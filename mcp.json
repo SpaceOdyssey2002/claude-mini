@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "demo": {
+      "command": "node",
+      "args": ["mcp-servers/demo-server.js"]
+    },
+    "filesystem": {
+      "command": "node",
+      "args": [
+        "node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "playground"
+      ]
+    }
+  }
+}
