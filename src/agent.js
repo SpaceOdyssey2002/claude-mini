@@ -80,7 +80,7 @@ export async function runAgentTurn(client, messages, deps) {
     while (true) {
       ui.onWaitStart(); // 开始等模型（界面会转 spinner）
 
-      const stream = await client.chat.completions.create(
+      const stream = await client.chat.completions.create( // create可以传几个参数？-mqh
         {
           model,
           messages: [{ role: "system", content: system }, ...messages],
@@ -95,15 +95,15 @@ export async function runAgentTurn(client, messages, deps) {
       const toolCalls = []; // 按 index 累积：{ id, name, arguments(字符串) }
       let started = false;
 
-      for await (const chunk of stream) {
-        if (chunk.usage) {
+      for await (const chunk of stream) { // for await 迭代流式输出，直到模型结束或被中断
+        if (chunk.usage) { // 迭代中间 chunk 没有 usage，只有最后一个 chunk 才有
           lastPromptTokens = chunk.usage.prompt_tokens || 0;
           turnInput += chunk.usage.prompt_tokens || 0;
           turnOutput += chunk.usage.completion_tokens || 0;
         }
         const choice = chunk.choices?.[0];
-        if (!choice) continue;
-        const delta = choice.delta || {};
+        if (!choice) continue;// 带 usage 的 chunk 很可能没有 choices
+        const delta = choice.delta || {}; // delta 里可能有 content、tool_calls、finish_reason
 
         if (!started && (delta.content || delta.tool_calls)) { started = true; ui.onWaitEnd(); }
         if (delta.content) { content += delta.content; ui.onToken(delta.content); }
@@ -114,6 +114,7 @@ export async function runAgentTurn(client, messages, deps) {
             if (tc.id) toolCalls[i].id = tc.id;
             if (tc.function?.name) toolCalls[i].name = tc.function.name;
             if (tc.function?.arguments) toolCalls[i].arguments += tc.function.arguments;
+            // 迭代中 delta.function.arguments 可能分几次发过来，累加
           }
         }
       }
@@ -122,8 +123,8 @@ export async function runAgentTurn(client, messages, deps) {
       // 所以这里显式检查信号。保留已生成的文字，丢弃不完整的工具调用。
       if (deps.signal?.aborted) {
         ui.onWaitEnd();
-        if (content) ui.onTextEnd();
-        if (content) messages.push({ role: "assistant", content });
+        if (content) ui.onTextEnd();// 
+        if (content) messages.push({ role: "assistant", content });// 保留已生成的文字
         repairToolResults(messages);
         return { aborted: true, lastPromptTokens, turnInput, turnOutput };
       }
@@ -138,7 +139,8 @@ export async function runAgentTurn(client, messages, deps) {
           id: t.id,
           type: "function",
           function: { name: t.name, arguments: t.arguments || "{}" },
-        }));
+          // 这里的 arguments 是字符串，后续 execOne 再 JSON.parse
+        })); 
       }
       messages.push(assistantMsg);
 
@@ -152,6 +154,7 @@ export async function runAgentTurn(client, messages, deps) {
         if (!confirmNeeded(toolCalls[i].name)) parallel.push(i);
       }
       await Promise.all(parallel.map((i) => execOne(toolCalls[i]).then((r) => { results[i] = r; })));
+      // 并行跑完了，剩下的串行跑
       for (let i = 0; i < toolCalls.length; i++) {
         if (!results[i]) results[i] = await execOne(toolCalls[i]);
       }
