@@ -61,6 +61,9 @@ function render(ev) {
       console.log(paint(c.yellow, `  ↻ 重试 ${ev.name}（${ev.reason}）`)); break;
     case "compaction":
       console.log(ui.box([paint(c.bold, "上下文压缩"), `${ev.before} → ${ev.after} 条消息（${ev.reason}）`], { color: c.blue })); break;
+    case "structured_output":
+      stopSpinner(); streaming = false;
+      console.log(ui.box([paint(c.bold + c.green, `结构化结果 · ${ev.format}`), ...ev.text.split("\n")], { color: c.green })); break;
     case "error":
       stopSpinner();
       console.log(ui.box([paint(c.bold + c.red, "出错"), ev.message], { color: c.red })); break;
@@ -100,6 +103,12 @@ function render(ev) {
       console.log(ui.box([paint(c.bold + c.green, "已保存会话"), ev.res.sessionId], { color: c.green })); break;
     case "_cleared":
       console.log(ui.box([paint(c.bold + c.green, "已清空上下文"), `${ev.res.before} -> ${ev.res.after} 条消息`], { color: c.green })); break;
+    case "_format":
+      console.log(ui.box([
+        paint(c.bold, "最终输出格式"),
+        `${ev.changed ? "已切换为" : "当前"}：${paint(c.cyan, ev.current)}`,
+        paint(c.dim, `可选：${ev.formats.map((f) => f.name).join(", ")}`),
+      ], { color: ev.changed ? c.green : c.gray })); break;
     case "_resumed":
       console.log(ui.box([
         paint(c.bold + c.green, "已恢复会话"),

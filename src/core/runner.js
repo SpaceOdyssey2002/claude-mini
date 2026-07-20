@@ -12,6 +12,7 @@ import { ToolRegistry } from "./registry.js";
 import { EventBus } from "./eventbus.js";
 import { Session } from "./memory.js";
 import { makeTracer } from "./trace.js";
+import { formatFinalOutput, resolveOutputContract } from "../output.js";
 
 export class AgentRunner {
   constructor({ client, model, session, autoApprove = false }) {
@@ -200,8 +201,12 @@ export class AgentRunner {
   }
 
   // 跑一次任务：goal → loop → idle
-  async run(goal) {
-    if (this.currentAbort) return { ok: false, error: "该会话已有任务正在运行" };
+  async run(goal, { outputFormat = "text" } = {}) {
+    if (this.currentAbort) return {
+      ok: false, error: "该会话已有任务正在运行", aborted: false, stopped: "busy",
+      outputFormat: "text", usage: { in: this.session.usage.in, out: this.session.usage.out, ctx: this.ctxTokens },
+    };
+    const outputContract = resolveOutputContract(outputFormat);
     const msgs = this.session.messages;
     msgs.push({ role: "user", content: goal });
     this.bus.emit({ type: "run_start", goal });
@@ -222,18 +227,46 @@ export class AgentRunner {
         ui: this.ui,
         signal: this.currentAbort.signal,
         system: this.systemPrompt + this.session.notesText(),
+        suppressText: !!outputContract,
       });
       await this.registry.finishRun({
         success: !usage?.aborted && !usage?.stopped,
         reason: usage?.aborted ? "aborted" : usage?.stopped || "end_turn",
       });
+      // LoopGuard 的受控收尾也应转换成结构化 partial/failed 结果；只有用户中断不再追加调用。
+      if (outputContract && !usage?.aborted) {
+        this.bus.emit({ type: "status", state: "formatting" });
+        const formatted = await formatFinalOutput(this.client, this.model, {
+          goal,
+          draft: usage?.finalContent || "",
+          contract: outputContract,
+          signal: this.currentAbort.signal,
+        });
+        usage.turnInput += formatted.usage.inputTokens;
+        usage.turnOutput += formatted.usage.outputTokens;
+        const last = msgs.at(-1);
+        if (last?.role === "assistant" && !last.tool_calls?.length) last.content = formatted.text;
+        this.bus.emit({
+          type: "structured_output",
+          format: outputContract.name,
+          value: formatted.value,
+          text: formatted.text,
+          attempts: formatted.attempts,
+        });
+        usage.structuredOutput = formatted.value;
+        usage.outputFormat = outputContract.name;
+      }
     } catch (e) {
       await this.registry.finishRun({ success: false, reason: "agent_error" });
       this.bus.emit({ type: "error", message: e.message });
       if (msgs.at(-1)?.role === "user") msgs.pop();
       this.bus.emit({ type: "status", state: "idle", stop_reason: "error" });
       this.currentAbort = null;
-      return { ok: false, error: e.message };
+      return {
+        ok: false, error: e.message, aborted: false, stopped: "error",
+        outputFormat: outputContract?.name || "text",
+        usage: { in: this.session.usage.in, out: this.session.usage.out, ctx: this.ctxTokens },
+      };
     }
     this.currentAbort = null;
     if (usage) {
@@ -254,6 +287,8 @@ export class AgentRunner {
       ok: true,
       aborted: !!usage?.aborted,
       stopped: usage?.stopped || "",
+      outputFormat: usage?.outputFormat || "text",
+      ...(usage?.structuredOutput !== undefined ? { result: usage.structuredOutput } : {}),
       usage: { in: this.session.usage.in, out: this.session.usage.out, ctx: this.ctxTokens },
     };
   }

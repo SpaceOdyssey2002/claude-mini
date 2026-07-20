@@ -216,7 +216,10 @@ export async function runAgentTurn(client, messages, deps) {
         const delta = choice.delta || {}; // delta 里可能有 content、tool_calls、finish_reason
 
         if (!started && (delta.content || delta.tool_calls)) { started = true; ui.onWaitEnd(); }
-        if (delta.content) { content += delta.content; ui.onToken(delta.content); }
+        if (delta.content) {
+          content += delta.content;
+          if (!deps.suppressText) ui.onToken(delta.content);
+        }
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls) {
             const i = tc.index;
@@ -233,14 +236,14 @@ export async function runAgentTurn(client, messages, deps) {
       // 所以这里显式检查信号。保留已生成的文字，丢弃不完整的工具调用。
       if (deps.signal?.aborted) {
         ui.onWaitEnd();
-        if (content) ui.onTextEnd();// 
+        if (content && !deps.suppressText) ui.onTextEnd();//
         if (content) messages.push({ role: "assistant", content });// 保留已生成的文字
         repairToolResults(messages);
         return { aborted: true, lastPromptTokens, turnInput, turnOutput, iterations, totalToolCalls };
       }
 
       if (!started) ui.onWaitEnd();
-      if (content) ui.onTextEnd();
+      if (content && !deps.suppressText) ui.onTextEnd();
 
       // 模型这条回复进历史
       const assistantMsg = { role: "assistant", content: content || null };
@@ -256,7 +259,7 @@ export async function runAgentTurn(client, messages, deps) {
 
       // 没有工具调用 —— 本回合结束
       if (!toolCalls.length) {
-        return { lastPromptTokens, turnInput, turnOutput, iterations, totalToolCalls, stopped: stopReason };
+        return { finalContent: content, lastPromptTokens, turnInput, turnOutput, iterations, totalToolCalls, stopped: stopReason };
       }
 
       // 强制收尾阶段理论上不会再产生工具调用；若模型仍然幻觉调用，补齐结果后停止。
