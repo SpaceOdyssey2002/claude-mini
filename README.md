@@ -18,6 +18,7 @@
 - 文件检查点：同一批 `write_file`/`edit_file` 在验证命令失败时恢复原文件或删除新建文件；回滚前用 SHA-256 检测并发修改冲突。
 - LoopGuard：限制模型迭代、工具总数、重复观察、连续错误和单轮总时长，触发后受控收尾。
 - Plan 模式：复杂任务通过 `update_plan` 保存结构化步骤、验收条件和证据。
+- 结构化结果：CLI/TUI 可选择预定义输出契约，任务完成后使用 `response_format` 收尾，并执行本地 Schema 校验和限次修复。
 - 工作目录沙箱：文件工具只能访问 `MINICODE_WORKSPACE` 内部路径。
 - 权限审批：写文件、改文件、执行命令、MCP 工具执行前需要确认；支持本会话放行和自动批准模式。
 - MCP：读取 `mcp.json`，连接本地或外部 MCP server，并把 MCP 工具转成模型可调用的 function tool。
@@ -45,6 +46,7 @@ minicode/
     skills.js             # Skills 加载与 use_skill 工具
     context.js            # token 粗估与上下文压缩
     plan.js               # 结构化 Plan 状态、步骤验收条件和证据约束
+    output.js             # 最终输出契约、JSON Schema 校验和结构化收尾重试
     session.js            # 旧单进程 REPL 的扁平会话存储
     ui.js                 # ANSI 终端渲染
 
@@ -166,16 +168,61 @@ exit / quit       退出客户端
 Ctrl+C            任务运行中为中断；空闲时为退出
 ```
 
-`/format` 只改变后续任务的最终交付格式，不影响中间工具调用。例如：
+### 结构化最终输出
+
+`/format` 只改变后续任务的最终交付格式，不影响中间工具调用。当前支持：
+
+| 模式 | 最终结果 | 适用场景 |
+| --- | --- | --- |
+| `text` | 普通流式自然语言 | 日常交互和人工阅读 |
+| `json` | 字段不限的 JSON 对象 | 临时 JSON 输出 |
+| `task_result` | 固定任务结果 Schema | 脚本、流水线和其他程序消费 |
+
+例如：
 
 ```text
 /format task_result
 修复登录接口并运行测试
 ```
 
-Client 会把 `outputFormat` 作为独立 JSON-RPC 参数交给 Daemon。Agent 完成工具执行后进入单独
-的结构化收尾阶段，使用 `response_format` 生成 JSON，再由本地 Schema 校验；格式不合法时
-最多修复两次。使用 `/format text` 可恢复普通流式自然语言输出。
+最终得到固定字段：
+
+```json
+{
+  "status": "completed",
+  "summary": "修复登录接口并完成验证",
+  "changed_files": ["src/login.js"],
+  "verification": ["npm test：23 项测试通过"],
+  "remaining": []
+}
+```
+
+这里不是把“请输出 JSON”拼进用户 Prompt。Client 会把格式名称作为独立控制字段发送：
+
+```json
+{
+  "goal": "修复登录接口并运行测试",
+  "outputFormat": "task_result"
+}
+```
+
+真正的 Schema 预定义在 `src/output.js`，调用方传的是契约名称，不需要手写 JSON Schema。
+处理流程如下：
+
+```text
+CLI/TUI 选择 outputFormat
+  -> Agent 正常调用文件、命令和 MCP 工具
+  -> 验证完成并结算文件检查点
+  -> 无工具的收尾调用使用 response_format 生成 JSON
+  -> 本地按预定义 Schema 校验
+     -> 合法：发出 structured_output 事件并返回解析后的 result
+     -> 非法：携带具体错误修复，最多重试两次
+```
+
+执行和收尾分离，避免最终 JSON Schema 干扰中间 Tool Calling。结构化模式会多一次模型调用；
+DeepSeek 的 `json_object` 保证 JSON 语法，字段完整性由本地 Schema 校验保证，但两者都不能
+保证内容在语义上真实，所以文件修改和测试结果仍以工具证据为准。使用 `/format text` 可恢复
+普通流式输出。该命令目前只接入 daemon/client 模式，旧的 `npm start` 单进程入口尚未支持。
 
 任务运行时，CLI/TUI 会在等待模型或工具链路时显示旋转处理图标；一旦开始流式输出、调用工具、进入审批或结束，会自动清掉 spinner。
 
