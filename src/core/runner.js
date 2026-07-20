@@ -13,6 +13,7 @@ import { EventBus } from "./eventbus.js";
 import { Session } from "./memory.js";
 import { makeTracer } from "./trace.js";
 import { formatFinalOutput, resolveOutputContract } from "../output.js";
+import { auditArgs, auditArgsHash, auditPreview } from "./audit.js";
 
 export class AgentRunner {
   constructor({ client, model, session, autoApprove = false }) {
@@ -85,10 +86,12 @@ export class AgentRunner {
       onWaitEnd: () => {},
       onToken: (t) => { buf += t; this.bus.emit({ type: "token", text: t }); },
       onTextEnd: () => { if (buf) this.bus.emit({ type: "message", text: buf }); buf = ""; },
-      onToolUse: (name, args) => this.bus.emit({ type: "tool_use", name, args }),
-      onToolResult: (name, result, { isError }) =>
-        this.bus.emit({ type: "tool_result", name, ok: !isError, preview: String(result).slice(0, 600) }),
-      confirm: (name, args) => this.requestPermission(name, args),
+      onToolUse: (name, args, audit = {}) => this.bus.emit({
+        type: "tool_use", name, args: auditArgs(args), argsSha256: auditArgsHash(args), ...audit,
+      }),
+      onToolResult: (name, result, { isError, ...audit }) =>
+        this.bus.emit({ type: "tool_result", name, ok: !isError, preview: auditPreview(result), ...audit }),
+      confirm: (name, args, audit) => this.requestPermission(name, args, audit),
     };
 
     // EventBus → trace（eventbus 层）
@@ -104,37 +107,46 @@ export class AgentRunner {
   }
 
   // 发起一次权限请求，返回一个 Promise，等客户端通过 respondPermission 回复
-  requestPermission(name, args) {
+  requestPermission(name, args, audit = {}) {
     const id = `perm-${++this.permSeq}`;
-    const detail = name === "run_command" ? args.command : args.path ?? JSON.stringify(args);
-    this.bus.emit({ type: "permission_request", id, name, detail });
+    const safeArgs = auditArgs(args);
+    const detail = name === "run_command" ? safeArgs.command : safeArgs.path ?? JSON.stringify(safeArgs);
+    const rememberAllowed = this.toolPolicies.get(name)?.allowSessionApproval !== false;
+    this.bus.emit({ type: "permission_request", id, name, detail, rememberAllowed, ...audit });
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        this.bus.emit({ type: "permission_response", id, decision: "timeout" });
+        this.bus.emit({ type: "permission_response", id, decision: "timeout", ...audit });
         resolve(false);
       }, Number(process.env.MINICODE_PERMISSION_TIMEOUT) || 300_000);
-      this.pending.set(id, (decision) => {
+      const decide = (decision) => {
         clearTimeout(timer);
-        if (decision === "a") this.sessionAllow.add(name);
-        resolve(decision === "y" || decision === "a");
-      });
+        const effective = decision === "a" && !rememberAllowed ? "y" : decision;
+        if (effective === "a") this.sessionAllow.add(name);
+        resolve(effective === "y" || effective === "a");
+      };
+      this.pending.set(id, { decide, audit, rememberAllowed });
     });
   }
   respondPermission(id, decision) {
-    const r = this.pending.get(id);
-    if (!r) return false;
+    const pending = this.pending.get(id);
+    if (!pending) return false;
     this.pending.delete(id);
-    this.bus.emit({ type: "permission_response", id, decision });
-    r(decision);
+    const effective = decision === "a" && !pending.rememberAllowed ? "y" : decision;
+    this.bus.emit({
+      type: "permission_response", id, decision: effective,
+      ...(effective !== decision ? { requestedDecision: decision } : {}),
+      ...pending.audit,
+    });
+    pending.decide(effective);
     return true;
   }
 
   interrupt() {
     this.currentAbort?.abort();
-    for (const [id, decide] of this.pending) {
+    for (const [id, pending] of this.pending) {
       this.pending.delete(id);
-      decide("n");
+      pending.decide("n");
     }
     return true;
   }
@@ -146,6 +158,7 @@ export class AgentRunner {
         name,
         kind: this.mcp?.isMcpTool(name) ? "mcp" : "local",
         needsConfirm: this.confirmNeeded(name),
+        sideEffect: this.toolPolicies.get(name)?.sideEffect || "unknown",
         description: t.function.description || "",
       };
     });

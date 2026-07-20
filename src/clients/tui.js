@@ -54,7 +54,9 @@ function render(ev) {
         `工具：${ev.name}`,
         paint(c.dim, `目标：${ev.detail}`),
         "",
-        paint(c.dim, "[y] 允许   [a] 本会话允许   [n] 拒绝"),
+        paint(c.dim, ev.rememberAllowed
+          ? "[y] 允许   [a] 本会话允许   [n] 拒绝"
+          : "[y] 单次允许   [n] 拒绝（高风险操作不可会话放行）"),
       ], { color: c.yellow }));
       break;
     case "retry":
@@ -79,7 +81,7 @@ function render(ev) {
         paint(c.bold, "MCP 服务器"),
         ...(ev.res.status.length ? ev.res.status.map((s) =>
           s.ok
-            ? `${paint(c.green, "●")} ${s.name}  ${s.toolCount} 个工具  ${paint(c.dim, (s.tools || []).join(", "))}`
+            ? `${paint(c.green, "●")} ${s.name}  ${s.transport || "stdio"} · ${s.toolCount} 个工具 · ${s.resourceCount || 0} 个资源  ${paint(c.dim, (s.tools || []).join(", "))}`
             : `${paint(c.red, "●")} ${s.name}  ${paint(c.dim, s.error || "连接失败")}`
         ) : [paint(c.dim, "未配置 MCP 服务器")]),
       ], { color: c.gray })); break;

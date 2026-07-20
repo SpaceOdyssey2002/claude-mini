@@ -8,10 +8,10 @@
 //   status                     运行状态：running / idle / aborted（带 stop_reason）
 //   token                      流式文字增量
 //   message                    一段完整的助手文字
-//   tool_use                   模型发起工具调用（name, args）
-//   tool_result                工具返回（name, ok, preview）
-//   permission_request         需要用户审批（id, name, detail）
-//   permission_response        审批结果（id, decision）
+//   tool_use                   模型发起工具调用（executionId, toolCallId, name, 脱敏 args）
+//   tool_result                工具返回（同一 executionId、状态、耗时、脱敏 preview）
+//   permission_request         需要用户审批（审批 id + executionId + 风险策略）
+//   permission_response        审批结果（审批 id + executionId + decision）
 //   retry                      工具瞬时失败重试
 //   usage                      token 用量
 //   compaction                 上下文压缩

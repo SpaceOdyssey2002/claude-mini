@@ -146,6 +146,12 @@ test("IPC permission approval uses event sessionId and resumes the run", async (
     assert.equal(await fs.readFile(path.join(temp, "approved.txt"), "utf8"), "ok");
     assert.ok(events.some((ev) => ev.type === "permission_request"));
     assert.ok(events.some((ev) => ev.type === "permission_response" && ev.decision === "y"));
+    const audited = ["tool_use", "permission_request", "permission_response", "tool_result"]
+      .map((type) => events.find((ev) => ev.type === type));
+    assert.ok(audited.every((ev) => ev?.executionId === "tool-call-write"));
+    assert.ok(audited.every((ev) => ev?.toolCallId === "call-write"));
+    assert.equal(audited[0].args.content.startsWith("[omitted "), true);
+    assert.equal(typeof audited[0].argsSha256, "string");
   } finally {
     conn.close();
     for (const runner of runners.values()) {

@@ -17,10 +17,17 @@ server.registerTool(
     title: "获取当前时间",
     description: "返回服务器当前的日期和时间。",
     inputSchema: {},
+    outputSchema: { display: z.string(), iso: z.string() },
+    annotations: { readOnlyHint: true, idempotentHint: true },
   },
-  async () => ({
-    content: [{ type: "text", text: new Date().toLocaleString("zh-CN") }],
-  })
+  async () => {
+    const now = new Date();
+    const structuredContent = { display: now.toLocaleString("zh-CN"), iso: now.toISOString() };
+    return {
+      content: [{ type: "text", text: structuredContent.display }],
+      structuredContent,
+    };
+  }
 );
 
 // 工具二：把两个数字相加（演示带参数的工具）
@@ -30,9 +37,33 @@ server.registerTool(
     title: "加法",
     description: "计算两个数字之和。",
     inputSchema: { a: z.number().describe("第一个数"), b: z.number().describe("第二个数") },
+    outputSchema: { a: z.number(), b: z.number(), sum: z.number() },
+    annotations: { readOnlyHint: true, idempotentHint: true },
   },
-  async ({ a, b }) => ({
-    content: [{ type: "text", text: `${a} + ${b} = ${a + b}` }],
+  async ({ a, b }) => {
+    const structuredContent = { a, b, sum: a + b };
+    return {
+      content: [{ type: "text", text: `${a} + ${b} = ${structuredContent.sum}` }],
+      structuredContent,
+    };
+  }
+);
+
+// Resource：演示“先发现、再按 URI 读取”，正文不会常驻系统 Prompt。
+server.registerResource(
+  "minicode-mcp-guide",
+  "demo://minicode/mcp-guide",
+  {
+    title: "minicode MCP 演示说明",
+    description: "说明 demo server 提供的工具和资源能力。",
+    mimeType: "text/markdown",
+  },
+  async () => ({
+    contents: [{
+      uri: "demo://minicode/mcp-guide",
+      mimeType: "text/markdown",
+      text: "# minicode MCP Demo\n\n本资源用于验证 Resources 发现与按需读取。",
+    }],
   })
 );
 

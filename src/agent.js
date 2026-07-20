@@ -8,7 +8,7 @@
 // 这个文件不关心"工具具体怎么执行"——执行交给 deps.dispatch，确认交给 deps.confirmNeeded，
 // 界面渲染交给 deps.ui，中断信号由 deps.signal 传入。
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export const DEFAULT_SYSTEM = `你是一个运行在用户终端里的编程助手（一个迷你版 Claude Code）。
 你可以读写文件、执行命令、搜索代码，能用通过 MCP 接入的外部工具，
@@ -131,30 +131,43 @@ export async function runAgentTurn(client, messages, deps) {
 
   // 执行单个工具调用，返回一条 tool 消息（不直接 push，便于并行后按原序回填）
   async function execOne(call) {
+    const startedAt = Date.now();
+    const audit = {
+      executionId: `tool-${call.id || randomUUID()}`,
+      toolCallId: call.id || null,
+      startedAt: new Date(startedAt).toISOString(),
+    };
     let args = {};
     try {
       args = JSON.parse(call.arguments || "{}");
     } catch {
-      return outcome(call, {}, JSON.stringify({
+      const message = JSON.stringify({
         ok: false,
         error: { code: "INVALID_TOOL_ARGUMENTS_JSON", classification: "permanent", retryable: false, message: "参数 JSON 解析失败" },
-      }), false);
+      });
+      ui.onToolUse(call.name, {}, audit);
+      ui.onToolResult(call.name, message, { ...audit, isError: true, durationMs: Date.now() - startedAt });
+      return outcome(call, {}, message, false);
     }
-    ui.onToolUse(call.name, args);
+    ui.onToolUse(call.name, args, audit);
     if (confirmNeeded(call.name)) {
-      const ok = await ui.confirm(call.name, args);
-      if (!ok) return outcome(call, args, JSON.stringify({
-        ok: false,
-        error: { code: "USER_DENIED", classification: "permanent", retryable: false, message: "用户拒绝了这次操作" },
-      }), false);
+      const ok = await ui.confirm(call.name, args, audit);
+      if (!ok) {
+        const message = JSON.stringify({
+          ok: false,
+          error: { code: "USER_DENIED", classification: "permanent", retryable: false, message: "用户拒绝了这次操作" },
+        });
+        ui.onToolResult(call.name, message, { ...audit, isError: true, durationMs: Date.now() - startedAt });
+        return outcome(call, args, message, false);
+      }
     }
     try {
-      const result = await dispatch(call.name, args, { signal: deps.signal });
-      ui.onToolResult(call.name, result, { isError: false });
+      const result = await dispatch(call.name, args, { signal: deps.signal, ...audit });
+      ui.onToolResult(call.name, result, { ...audit, isError: false, durationMs: Date.now() - startedAt });
       return outcome(call, args, result, true);
     } catch (err) {
       const msg = errorContent(err);
-      ui.onToolResult(call.name, msg, { isError: true });
+      ui.onToolResult(call.name, msg, { ...audit, isError: true, durationMs: Date.now() - startedAt });
       return outcome(call, args, msg, false);
     }
   }
