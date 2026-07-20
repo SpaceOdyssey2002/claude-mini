@@ -1,12 +1,13 @@
 // setup.js —— 装配 agent 上下文：把工具集、MCP、子 agent、Skills、dispatch 一次性建好。
 // REPL（index.js）和 daemon（core/runner.js）都用它，避免重复装配逻辑。
 
-import { tools as builtinTools, handlers, needsConfirm, toolPolicies as builtinPolicies } from "./tools.js";
+import { tools as builtinTools, handlers, needsConfirm, toolPolicies as builtinPolicies, getWorkspace } from "./tools.js";
 import { McpManager } from "./mcp.js";
 import { makeSubagentTool } from "./subagent.js";
 import { loadSkills, skillsSection, makeSkillTool } from "./skills.js";
 import { DEFAULT_SYSTEM } from "./agent.js";
 import { PlanState, makePlanTool } from "./plan.js";
+import { FileCheckpointManager } from "./core/checkpoint.js";
 
 /**
  * @param {Object} opts
@@ -44,6 +45,7 @@ export async function buildAgentContext({ client, model, getSignal, onSubStep })
   // Plan 状态不依赖聊天窗口；历史被压缩后仍会在每次模型调用前重新注入。
   const planState = new PlanState();
   const { tool: planTool, handler: planHandler, policy: planPolicy } = makePlanTool(planState);
+  const checkpointManager = new FileCheckpointManager({ root: getWorkspace() });
 
   const allTools = [...builtinTools, ...mcp.tools, ...subTools, planTool, ...(skills.length ? [skillTool] : [])];
   const toolPolicies = new Map(builtinPolicies);
@@ -59,6 +61,7 @@ export async function buildAgentContext({ client, model, getSignal, onSubStep })
 
   return {
     mcp, dispatch, allTools, skills, systemPrompt, baseConfirmNeeded, isReadOnly,
-    isParallelSafe, toolPolicies, planState, statePrompt: () => planState.prompt(),
+    isParallelSafe, toolPolicies, planState, checkpointManager,
+    statePrompt: () => planState.prompt(),
   };
 }

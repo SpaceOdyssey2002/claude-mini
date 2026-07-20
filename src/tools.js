@@ -242,15 +242,30 @@ const nonEmptyText = (result) => typeof result === "string" && result.length > 0
 const prefixText = (prefix) => (result) => typeof result === "string" && result.startsWith(prefix)
   ? null : `工具结果必须以 '${prefix}' 开头`;
 
-export const toolPolicies = new Map([
+/** @type {Map<string, any>} */
+export const toolPolicies = new Map(/** @type {Array<[string, any]>} */ ([
   ["read_file",  { sideEffect: "none", requiresApproval: false, parallelSafe: true,  idempotent: true,  timeoutMs: 10_000, maxRetries: 2, validateResult: prefixText("[文件 ") }],
   ["list_dir",   { sideEffect: "none", requiresApproval: false, parallelSafe: true,  idempotent: true,  timeoutMs: 10_000, maxRetries: 2 }],
   ["grep",       { sideEffect: "none", requiresApproval: false, parallelSafe: true,  idempotent: true,  timeoutMs: 30_000, maxRetries: 1, validateResult: nonEmptyText }],
   ["glob",       { sideEffect: "none", requiresApproval: false, parallelSafe: true,  idempotent: true,  timeoutMs: 30_000, maxRetries: 1, validateResult: nonEmptyText }],
-  ["write_file", { sideEffect: "workspace-write", requiresApproval: true, parallelSafe: false, idempotent: true,  timeoutMs: 15_000, maxRetries: 1, validateResult: prefixText("已写入 ") }],
-  ["edit_file",  { sideEffect: "workspace-write", requiresApproval: true, parallelSafe: false, idempotent: false, timeoutMs: 15_000, maxRetries: 0, validateResult: prefixText("已修改 ") }],
-  ["run_command",{ sideEffect: "process", requiresApproval: true, parallelSafe: false, idempotent: false, timeoutMs: 125_000, maxRetries: 0, validateResult: nonEmptyText }],
-]);
+  ["write_file", {
+    sideEffect: "workspace-write", requiresApproval: true, parallelSafe: false,
+    idempotent: true, timeoutMs: 15_000, maxRetries: 1,
+    validateResult: prefixText("已写入 "), checkpointPaths: (args) => [args.path],
+  }],
+  ["edit_file", {
+    sideEffect: "workspace-write", requiresApproval: true, parallelSafe: false,
+    idempotent: false, timeoutMs: 15_000, maxRetries: 0,
+    validateResult: prefixText("已修改 "), checkpointPaths: (args) => [args.path],
+  }],
+  ["run_command", {
+    sideEffect: "process", requiresApproval: true, parallelSafe: false,
+    idempotent: false, timeoutMs: 125_000, maxRetries: 0,
+    validateResult: nonEmptyText,
+    // 命令只作为文件检查点的验证边界；命令自身及外部副作用不在回滚范围内。
+    settlesCheckpoint: true,
+  }],
+]));
 
 export const needsConfirm = new Set(
   [...toolPolicies].filter(([, p]) => p.requiresApproval).map(([name]) => name)
