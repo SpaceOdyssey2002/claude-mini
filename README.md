@@ -161,9 +161,21 @@ CLI/TUI 支持的本地命令：
 /resume [id]      恢复会话；不传 id 时恢复最近一次
 /save [title]     保存当前会话，可选标题
 /clear            清空当前上下文
+/format [模式]    查看或设置最终输出：text / json / task_result
 exit / quit       退出客户端
 Ctrl+C            任务运行中为中断；空闲时为退出
 ```
+
+`/format` 只改变后续任务的最终交付格式，不影响中间工具调用。例如：
+
+```text
+/format task_result
+修复登录接口并运行测试
+```
+
+Client 会把 `outputFormat` 作为独立 JSON-RPC 参数交给 Daemon。Agent 完成工具执行后进入单独
+的结构化收尾阶段，使用 `response_format` 生成 JSON，再由本地 Schema 校验；格式不合法时
+最多修复两次。使用 `/format text` 可恢复普通流式自然语言输出。
 
 任务运行时，CLI/TUI 会在等待模型或工具链路时显示旋转处理图标；一旦开始流式输出、调用工具、进入审批或结束，会自动清掉 spinner。
 

@@ -77,14 +77,14 @@ function makeMethods(send) {
       return { sessionId: r.session.id, ...r.clear() };
     },
 
-    async run({ sessionId, goal, autoApprove }) {
+    async run({ sessionId, goal, autoApprove, outputFormat = "text" }) {
       const r = await getRunner(sessionId, !!autoApprove);
       r.autoApprove = !!autoApprove;
       // 把该 runner 的事件流转发给当前连接
       const unsub = r.bus.subscribe((ev) => send(rpc.notify("event", { sessionId: r.session.id, ...ev })));
-      r.tracer("ipc", "in", { method: "run", goal });
+      r.tracer("ipc", "in", { method: "run", goal, outputFormat });
       try {
-        const res = await r.run(goal);
+        const res = await r.run(goal, { outputFormat });
         r.tracer("ipc", "out", res);
         return { sessionId: r.session.id, ...res };
       } finally {

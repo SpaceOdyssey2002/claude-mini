@@ -5,6 +5,7 @@ import net from "node:net";
 import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { frame, createLineParser, rpc } from "../core/rpc.js";
+import { listOutputFormats, resolveOutputContract } from "../output.js";
 
 const PORT = Number(process.env.MINICODE_PORT) || 47800;
 
@@ -60,6 +61,7 @@ function helpLines() {
     "/resume [id]      恢复会话；不传 id 时恢复最近一次",
     "/save [title]     保存当前会话，可选标题",
     "/clear            清空当前上下文",
+    "/format [模式]    查看或设置最终输出：text / json / task_result",
     "exit / quit       退出客户端",
     "Ctrl+C            任务运行中为中断；空闲时为退出",
   ];
@@ -85,6 +87,7 @@ export async function runRepl({ render, title, onReady = null }) {
 
   let sessionId = null;
   let busy = false;
+  let outputFormat = "text";
 
   conn.onEvent(async (ev) => {
     render(ev);
@@ -172,12 +175,29 @@ export async function runRepl({ render, title, onReady = null }) {
         render({ type: "_cleared", res });
         continue;
       }
+      if (cmd === "format") {
+        if (!arg) {
+          render({ type: "_format", current: outputFormat, formats: listOutputFormats() });
+          continue;
+        }
+        try {
+          resolveOutputContract(arg);
+          outputFormat = arg.trim().toLowerCase();
+          render({ type: "_format", current: outputFormat, formats: listOutputFormats(), changed: true });
+        } catch (e) {
+          render({ type: "error", message: e.message });
+        }
+        continue;
+      }
       render({ type: "error", message: `未知命令 /${cmd}，输入 /help 查看可用命令。` });
       continue;
     }
     busy = true;
     try {
-      const res = await conn.call("run", { sessionId, goal: text, autoApprove: !!process.env.MINICODE_YES });
+      const res = await conn.call("run", {
+        sessionId, goal: text, outputFormat,
+        autoApprove: !!process.env.MINICODE_YES,
+      });
       sessionId = res.sessionId;
       render({ type: "_status_line", res });
     } catch (e) {

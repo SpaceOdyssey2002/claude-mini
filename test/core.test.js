@@ -16,6 +16,7 @@ import { handlers, setWorkspace, getWorkspace, tools, toolPolicies } from "../sr
 import { runAgentTurn } from "../src/agent.js";
 import { PlanState } from "../src/plan.js";
 import { FileCheckpointManager } from "../src/core/checkpoint.js";
+import { formatFinalOutput, parseAndValidateOutput, resolveOutputContract } from "../src/output.js";
 
 // ── ToolRegistry：参数校验 ──
 test("validateArgs 缺必填参数报错", () => {
@@ -347,4 +348,63 @@ test("文件工具拦截越界路径", async () => {
   await assert.rejects(() => handlers.read_file({ path: "../../../etc/passwd" }), /越界/);
   await assert.rejects(() => handlers.read_file({ path: "C:/Windows/win.ini" }), /越界/);
   await assert.rejects(() => handlers.edit_file({ path: "C:/Windows/win.ini", old_str: "x", new_str: "y" }), /越界/);
+});
+
+// ── 最终输出契约 ──
+test("task_result 输出契约校验字段、类型和额外参数", () => {
+  const contract = resolveOutputContract("task_result");
+  const valid = parseAndValidateOutput(JSON.stringify({
+    status: "completed",
+    summary: "修复完成",
+    changed_files: ["src/agent.js"],
+    verification: ["npm test"],
+    remaining: [],
+  }), contract);
+  assert.equal(valid.ok, true);
+
+  const invalid = parseAndValidateOutput(JSON.stringify({
+    status: "done",
+    summary: "修复完成",
+    changed_files: [],
+    verification: [],
+    remaining: [],
+    invented: true,
+  }), contract);
+  assert.equal(invalid.ok, false);
+  assert.ok(invalid.errors.length >= 2);
+});
+
+test("输出契约拒绝非法 JSON 和未知格式", () => {
+  assert.equal(parseAndValidateOutput("not-json", resolveOutputContract("json")).ok, false);
+  assert.throws(() => resolveOutputContract("xml"), /未知输出格式/);
+});
+
+test("结构化收尾使用 response_format，并在本地校验失败后修复", async () => {
+  const requests = [];
+  const replies = [
+    '{"status":"done"}',
+    JSON.stringify({
+      status: "completed",
+      summary: "完成",
+      changed_files: [],
+      verification: ["npm test"],
+      remaining: [],
+    }),
+  ];
+  const client = {
+    chat: { completions: { create: async (request) => {
+      requests.push(request);
+      return {
+        choices: [{ message: { content: replies.shift() } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      };
+    } } },
+  };
+  const result = await formatFinalOutput(client, "fake", {
+    goal: "完成任务", draft: "测试通过", contract: resolveOutputContract("task_result"),
+  });
+  assert.equal(result.attempts, 2);
+  assert.equal(result.value.status, "completed");
+  assert.equal(requests[0].response_format.type, "json_object");
+  assert.match(requests[1].messages.at(-1).content, /Schema 校验/);
 });

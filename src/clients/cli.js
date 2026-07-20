@@ -47,6 +47,9 @@ function render(ev) {
       console.log(paint(c.yellow, `  ↻ 重试 ${ev.name}（${ev.reason}）`)); break;
     case "compaction":
       console.log(paint(c.dim, `  ✦ 压缩上下文 ${ev.before}→${ev.after} 条`)); break;
+    case "structured_output":
+      stopSpinner(); streaming = false;
+      console.log("\n" + paint(c.green + c.bold, "● ") + ev.text); break;
     case "error":
       stopSpinner();
       console.log(paint(c.red, `\n✗ ${ev.message}`)); break;
@@ -86,6 +89,9 @@ function render(ev) {
       console.log(paint(c.green, `  ✓ 已保存会话 ${ev.res.sessionId}`)); break;
     case "_cleared":
       console.log(paint(c.green, `  ✓ 已清空当前上下文：${ev.res.before} -> ${ev.res.after} 条消息`)); break;
+    case "_format":
+      console.log(paint(ev.changed ? c.green : c.cyan, `  ${ev.changed ? "✓" : "•"} 输出格式：${ev.current}`) +
+        paint(c.dim, `  可选：${ev.formats.map((f) => f.name).join(", ")}`)); break;
     case "_resumed":
       console.log(paint(c.green, `  ✓ 已恢复会话 ${ev.res.sessionId}`) + paint(c.dim, `  threads=${ev.res.threads} notes=${ev.res.notes} messages=${ev.res.msgs}`)); break;
     case "_status_line": {
