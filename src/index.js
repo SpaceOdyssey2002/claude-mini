@@ -9,11 +9,12 @@ import { stdin, stdout } from "node:process";
 import { runAgentTurn, DEFAULT_SYSTEM } from "./agent.js";
 import { tools as builtinTools, handlers, needsConfirm, setWorkspace, getWorkspace } from "./tools.js";
 import { McpManager } from "./mcp.js";
-import { compact } from "./context.js";
+import { compact, estimateTokens } from "./context.js";
 import { makeSubagentTool } from "./subagent.js";
 import { loadSkills, skillsSection, makeSkillTool } from "./skills.js";
 import { newSessionId, saveSession, loadSession, listSessions } from "./session.js";
 import { buildAgentContext } from "./setup.js";
+import { ToolRegistry } from "./core/registry.js";
 import * as ui from "./ui.js";
 
 const { c, paint } = ui;
@@ -64,6 +65,12 @@ function ask(prompt = "") {
   return new Promise((res) => waiters.push(res));
 }
 
+//const answer = await ask("请输入：");
+//ask() 创建并返回了一个 Promise（空盒子）。
+//await 拿到并扣留了这个盒子。
+//res(l) 触发，把 l（内容） 发送给了这个盒子。
+//await 看到盒子满了，自动开箱取出 l，交给了 answer。
+
 // ── 主程序 ───────────────────────────────────────────────────────────
 async function main() {
   // 当前回合的中断控制器（Ctrl+C 时 abort）
@@ -73,13 +80,25 @@ async function main() {
 
   // 1) 装配 agent 上下文（MCP / 子 agent / Skills / dispatch / 系统提示）
   const stop = ui.startSpinner("连接 MCP 服务器");
-  const { mcp, dispatch, allTools, skills, systemPrompt, baseConfirmNeeded } = await buildAgentContext({
+  const {
+    mcp, dispatch, allTools, skills, systemPrompt, baseConfirmNeeded,
+    isParallelSafe, toolPolicies, statePrompt, planState,
+  } = await buildAgentContext({
     client, model: MODEL,
     getSignal: () => currentAbort?.signal,
     onSubStep: (n, a, label) => console.log(paint(c.dim, `     ↳ 子助手${label || ""} ${n} ${a.pattern || a.path || ""}`)),
   });
   stop();
   const hasMcp = mcp.tools.length > 0;
+  // 单进程模式也统一经过 ToolRegistry，避免与 daemon 的校验、超时和重试语义不一致。
+  const registry = new ToolRegistry({
+    dispatch,
+    tools: allTools,
+    policies: toolPolicies,
+    onEvent: (ev) => {
+      if (ev.type === "retry") console.log(paint(c.yellow, `  ↻ ${ev.name} 第 ${ev.attempt} 次重试：${ev.message}`));
+    },
+  });
 
   // 空闲时 Ctrl+C 退出；生成中 Ctrl+C 打断（中断在下方 turn 里处理）
   rl.on("SIGINT", () => {
@@ -170,15 +189,16 @@ async function main() {
     } catch (e) {
       stop();
       console.log(paint(c.red, "  压缩失败：" + e.message));
-      return;
+      return false;
     }
     stop();
-    if (!newMsgs) { console.log(paint(c.dim, "  （历史还很短，无需压缩）")); return; }
+    if (!newMsgs) { console.log(paint(c.dim, "  （历史还很短，无需压缩）")); return false; }
     const before = messages.length;
     messages.length = 0;
     messages.push(...newMsgs);
     ctxTokens = 0; // 压缩后真实大小等下一轮再测
     console.log(paint(c.dim, `  ✦ 已压缩上下文${reason ? "（" + reason + "）" : ""}：${before} → ${messages.length} 条消息`));
+    return true;
   }
 
   // 每轮结束后的状态行
@@ -204,6 +224,7 @@ async function main() {
     if (!s) { console.log(paint(c.dim, `  未找到会话 ${target}`)); return; }
     messages.length = 0;
     messages.push(...(s.messages || []));
+    planState.clear();
     sessionIn = s.sessionIn || 0; sessionOut = s.sessionOut || 0; ctxTokens = 0;
     currentSessionId = s.id;
     console.log(paint(c.green, `  ✦ 已恢复会话 ${s.id}`) + paint(c.dim, `（${messages.length} 条消息）`));
@@ -229,7 +250,7 @@ async function main() {
       const arg = parts.slice(1).join(" ");
       if (cmd === "exit" || cmd === "quit") break;
       if (cmd === "help") { printHelp(); continue; }
-      if (cmd === "clear") { messages.length = 0; sessionIn = sessionOut = ctxTokens = 0; console.log(paint(c.dim, "（已清空对话历史）")); continue; }
+      if (cmd === "clear") { messages.length = 0; planState.clear(); sessionIn = sessionOut = ctxTokens = 0; console.log(paint(c.dim, "（已清空对话历史）")); continue; }
       if (cmd === "tools") { printTools(allTools, mcp); continue; }
       if (cmd === "mcp") { printMcp(mcp); continue; }
       if (cmd === "skills") {
@@ -261,8 +282,14 @@ async function main() {
       const usage = await runAgentTurn(client, messages, {
         model: MODEL,
         tools: allTools,
-        dispatch,
+        dispatch: (name, args, context) => registry.run(name, args, context),
         confirmNeeded,
+        parallelSafe: isParallelSafe,
+        statePrompt,
+        compactIfNeeded: async () => {
+          if (estimateTokens(messages) <= COMPACT_AT) return false;
+          return doCompact("单轮执行中超过阈值");
+        },
         ui: callbacks,
         signal: currentAbort.signal,
         system: systemPrompt,

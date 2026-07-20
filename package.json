@@ -15,6 +15,8 @@
     "cli": "node src/clients/cli.js",
     "tui": "node src/clients/tui.js",
     "replay": "node src/clients/replay.js",
+    "benchmark": "node benchmark/run.js --mode real --runs 3",
+    "benchmark:mock": "node benchmark/run.js --mode mock --runs 1",
     "test": "node --test",
     "typecheck": "tsc -p jsconfig.json"
   },

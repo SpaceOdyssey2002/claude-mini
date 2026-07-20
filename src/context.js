@@ -45,13 +45,28 @@ export async function compact(client, model, messages, { keepTurns = 2 } = {}) {
   messages.forEach((m, i) => {
     if (m.role === "user" && typeof m.content === "string") userIdx.push(i);
   });
-  // 轮数不够，没必要压缩
-  if (userIdx.length <= keepTurns) return null;
-
-  const splitAt = userIdx[userIdx.length - keepTurns]; // 从这里开始保留
-  const older = messages.slice(0, splitAt);
-  const kept = messages.slice(splitAt);
-  if (older.length === 0) return null;
+  let older, kept, prefix = [], summaryTitle = "前情摘要（之前对话的压缩）";
+  if (userIdx.length > keepTurns) {
+    const splitAt = userIdx[userIdx.length - keepTurns]; // 从这里开始保留
+    older = messages.slice(0, splitAt);
+    kept = messages.slice(splitAt);
+  } else {
+    // 单个用户回合也可能产生大量工具循环。只压缩较早且完整的 assistant/tool 组，
+    // 保留当前用户目标和最近 3 组工具交互，避免切断 tool_call/tool_result 配对。
+    const lastUser = userIdx.at(-1);
+    if (lastUser === undefined) return null;
+    const groups = [];
+    for (let i = lastUser + 1; i < messages.length; i++) {
+      if (messages[i].role === "assistant" && messages[i].tool_calls?.length) groups.push(i);
+    }
+    if (groups.length <= 3) return null;
+    const keepFrom = groups[groups.length - 3];
+    prefix = messages.slice(0, lastUser + 1);
+    older = messages.slice(lastUser + 1, keepFrom);
+    kept = messages.slice(keepFrom);
+    summaryTitle = "当前回合较早执行过程摘要";
+  }
+  if (!older.length) return null;
 
   // 让模型把旧对话总结成摘要
   const res = await client.chat.completions.create({
@@ -61,19 +76,23 @@ export async function compact(client, model, messages, { keepTurns = 2 } = {}) {
       {
         role: "user",
         content:
-          "把下面的对话历史压缩成简洁的中文要点摘要，必须保留：关键事实、已做的决定、" +
-          "改动过的文件及其要点、尚未完成的任务。\n\n===== 对话历史 =====\n" +
+          "把下面的执行历史压缩成结构化中文摘要。严格使用这些小节：原始目标、不可变约束、" +
+          "已确认事实、已做决定及原因、已修改文件、验证结果、失败方案（避免重复）、当前进度、未解决问题。" +
+          "只记录有工具证据支持的事实，不要把失败调用的猜测写成事实。\n\n===== 对话历史 =====\n" +
           renderHistory(older),
       },
     ],
   });
   const summary = res.choices?.[0]?.message?.content?.trim() || "(摘要为空)";
 
-  // 把摘要前缀进保留段第一条用户消息里
+  if (prefix.length) {
+    return [...prefix, { role: "assistant", content: `【${summaryTitle}】\n${summary}` }, ...kept];
+  }
+
+  // 跨用户轮压缩时，把摘要前缀进保留段第一条用户消息。
   const first = kept[0];
-  const newFirst = {
+  return [{
     role: "user",
-    content: `【前情摘要（之前对话的压缩）】\n${summary}\n\n【当前请求】\n${first.content}`,
-  };
-  return [newFirst, ...kept.slice(1)];
+    content: `【${summaryTitle}】\n${summary}\n\n【当前请求】\n${first.content}`,
+  }, ...kept.slice(1)];
 }

@@ -10,9 +10,9 @@ export function classifyError(err) {
   const m = (err?.message || "").toLowerCase();
   const status = err?.status;
   if (err?.name === "AbortError" || err?.name === "APIUserAbortError") return { kind: "aborted", retryable: false };
-  if (status === 429 || status >= 500 || /timeout|econn|network|socket|fetch failed|503|overload/.test(m))
+  if (status === 429 || status >= 500 || /timeout|timed out|etimedout|econn|network|socket|fetch failed|503|overload|requesttimeout/.test(m))
     return { kind: "transient", retryable: true };
-  if (/越界|not found|找不到|enoent|无权|permission|拒绝|invalid|校验失败/.test(m))
+  if (/越界|outside allowed|not found|找不到|不存在|enoent|无权|permission|拒绝|invalid|校验失败|不匹配|not unique/.test(m))
     return { kind: "permanent", retryable: false };
   return { kind: "unknown", retryable: false };
 }
@@ -31,58 +31,158 @@ function typeOk(v, t) {
 }
 export function validateArgs(schema, args) {
   const errs = [];
-  if (!schema || schema.type !== "object") return errs;
-  const props = schema.properties || {};
-  args = args || {};
-  for (const req of schema.required || []) {
-    if (args[req] === undefined) errs.push(`缺少必填参数 '${req}'`);
+
+  function visit(s, value, label) {
+    if (!s) return;
+    if (s.type && !typeOk(value, s.type)) {
+      errs.push(`${label}类型应为 ${s.type}`);
+      return;
+    }
+    if (s.enum && !s.enum.includes(value)) errs.push(`${label}应为 ${s.enum.join("/")} 之一`);
+    if (typeof value === "string") {
+      if (s.minLength !== undefined && value.length < s.minLength) errs.push(`${label}长度不能小于 ${s.minLength}`);
+      if (s.maxLength !== undefined && value.length > s.maxLength) errs.push(`${label}长度不能大于 ${s.maxLength}`);
+      if (s.pattern) {
+        try { if (!new RegExp(s.pattern).test(value)) errs.push(`${label}格式不匹配 ${s.pattern}`); }
+        catch { errs.push(`${label}的 schema pattern 无效`); }
+      }
+    }
+    if (typeof value === "number") {
+      if (s.minimum !== undefined && value < s.minimum) errs.push(`${label}不能小于 ${s.minimum}`);
+      if (s.maximum !== undefined && value > s.maximum) errs.push(`${label}不能大于 ${s.maximum}`);
+    }
+    if (Array.isArray(value)) {
+      if (s.minItems !== undefined && value.length < s.minItems) errs.push(`${label}至少需要 ${s.minItems} 项`);
+      if (s.maxItems !== undefined && value.length > s.maxItems) errs.push(`${label}最多允许 ${s.maxItems} 项`);
+      if (s.items) value.forEach((item, i) => visit(s.items, item, `${label}[${i}] `));
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const props = s.properties || {};
+      for (const req of s.required || []) {
+        if (value[req] === undefined) errs.push(`${label}缺少必填参数 '${req}'`);
+      }
+      for (const [k, v] of Object.entries(value)) {
+        if (!props[k]) {
+          if (s.additionalProperties === false) errs.push(`${label}不允许额外参数 '${k}'`);
+          continue;
+        }
+        visit(props[k], v, `${label}参数 '${k}' `);
+      }
+    }
   }
-  for (const [k, v] of Object.entries(args)) {
-    const p = props[k];
-    if (!p) continue; // 允许额外字段
-    if (p.type && !typeOk(v, p.type)) errs.push(`参数 '${k}' 类型应为 ${p.type}`);
-    if (p.enum && !p.enum.includes(v)) errs.push(`参数 '${k}' 应为 ${p.enum.join("/")} 之一`);
-  }
+
+  if (!schema) return ["找不到工具参数 schema"];
+  visit(schema, args ?? {}, "");
   return errs;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  if (signal?.aborted) return reject(Object.assign(new Error("操作已中断"), { name: "AbortError" }));
+  const onAbort = () => {
+    clearTimeout(timer);
+    reject(Object.assign(new Error("操作已中断"), { name: "AbortError" }));
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", onAbort);
+    resolve();
+  }, ms);
+  signal?.addEventListener("abort", onAbort, { once: true });
+});
+
+async function withTimeout(run, timeoutMs, parentSignal) {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) controller.abort(parentSignal.reason);
+  else parentSignal?.addEventListener("abort", onAbort, { once: true });
+  let timer;
+  let rejectParentAbort;
+  const parentAbort = new Promise((_, reject) => { rejectParentAbort = reject; });
+  const rejectOnParentAbort = () => {
+    onAbort();
+    rejectParentAbort(Object.assign(new Error("操作已中断"), { name: "AbortError" }));
+  };
+  parentSignal?.removeEventListener("abort", onAbort);
+  if (parentSignal?.aborted) rejectOnParentAbort();
+  else parentSignal?.addEventListener("abort", rejectOnParentAbort, { once: true });
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = Object.assign(new Error(`工具执行超时（${timeoutMs}ms）`), { code: "TOOL_TIMEOUT" });
+      reject(err);
+      controller.abort(err);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([run(controller.signal), timeout, parentAbort]);
+  } finally {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", rejectOnParentAbort);
+  }
+}
 
 export class ToolRegistry {
   /**
    * @param {Object} opts
    *   @param {Function} opts.dispatch   底层执行器 (name,args)=>Promise<string>
    *   @param {Array}    opts.tools      工具列表（取其 schema 用于校验）
+   *   @param {Map<string, Object>|Object} [opts.policies] 工具策略
    *   @param {number}   [opts.maxRetries=2]
    *   @param {Function} [opts.onEvent]  (ev)=>void  重试等事件回调
    */
-  constructor({ dispatch, tools = [], maxRetries = 2, onEvent }) {
+  constructor({ dispatch, tools = [], policies = new Map(), maxRetries = 2, onEvent }) {
     this.dispatch = dispatch;
     this.maxRetries = maxRetries;
     this.onEvent = onEvent || (() => {});
+    this.policies = policies instanceof Map ? policies : new Map(Object.entries(policies || {}));
     this.schemas = new Map();
     for (const t of tools || []) this.schemas.set(t.function.name, t.function.parameters);
   }
 
   setTools(tools) { for (const t of tools) this.schemas.set(t.function.name, t.function.parameters); }
 
-  async run(name, args) {
+  async run(name, args, context = {}) {
     // 1. 参数校验
     const errs = validateArgs(this.schemas.get(name), args);
-    if (errs.length) throw new Error(`参数校验失败：${errs.join("；")}`);
+    if (errs.length) {
+      throw Object.assign(new Error(`参数校验失败：${errs.join("；")}`), {
+        code: "INVALID_TOOL_ARGUMENTS", classification: "permanent", retryable: false,
+      });
+    }
 
     // 2. 执行 + 瞬时错误重试
+    const policy = this.policies.get(name) || {};
+    const timeoutMs = policy.timeoutMs || 60_000;
+    const retries = policy.idempotent === false ? 0 : (policy.maxRetries ?? this.maxRetries);
     let lastErr;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        return await this.dispatch(name, args);
+        const result = await withTimeout(
+          (signal) => this.dispatch(name, args, { ...context, signal }),
+          timeoutMs,
+          context.signal
+        );
+        if (result === undefined || result === null) {
+          const err = Object.assign(new Error("工具返回了空的 undefined/null 结果"), { code: "INVALID_TOOL_RESULT" });
+          throw err;
+        }
+        if (policy.validateResult) {
+          const validationError = policy.validateResult(result, args);
+          if (validationError) {
+            throw Object.assign(new Error(`工具结果校验失败：${validationError}`), {
+              code: "INVALID_TOOL_RESULT", classification: "permanent", retryable: false,
+            });
+          }
+        }
+        return typeof result === "string" ? result : JSON.stringify(result);
       } catch (err) {
         lastErr = err;
         const cls = classifyError(err);
         err.classification = cls.kind;
-        if (cls.retryable && attempt < this.maxRetries) {
+        err.retryable = cls.retryable && policy.idempotent !== false;
+        if (err.retryable && attempt < retries) {
           this.onEvent({ type: "retry", name, attempt: attempt + 1, reason: cls.kind, message: err.message });
-          await sleep(300 * (attempt + 1));
+          const base = 300 * (2 ** attempt);
+          const jitter = Math.floor(Math.random() * 100);
+          await sleep(base + jitter, context.signal);
           continue;
         }
         throw err;

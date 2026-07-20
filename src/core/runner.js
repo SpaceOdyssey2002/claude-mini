@@ -7,7 +7,7 @@
 import path from "node:path";
 import { runAgentTurn } from "../agent.js";
 import { buildAgentContext } from "../setup.js";
-import { compact } from "../context.js";
+import { compact, estimateTokens } from "../context.js";
 import { ToolRegistry } from "./registry.js";
 import { EventBus } from "./eventbus.js";
 import { Session } from "./memory.js";
@@ -42,6 +42,8 @@ export class AgentRunner {
     this.skills = ctx.skills;
     this.baseConfirmNeeded = ctx.baseConfirmNeeded;
     this.systemPrompt = ctx.systemPrompt;
+    this.statePrompt = ctx.statePrompt;
+    this.planState = ctx.planState;
 
     // notes 工具：让 agent 能把信息记进「跨话题持久笔记」
     const noteTool = {
@@ -49,16 +51,30 @@ export class AgentRunner {
       function: {
         name: "take_note",
         description: "把一条需要长期记住的信息记进笔记（跨会话/话题保留，下次也能看到）。",
-        parameters: { type: "object", properties: { text: { type: "string", description: "要记的内容" } }, required: ["text"] },
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string", minLength: 1, maxLength: 2000, description: "要记的内容" } },
+          required: ["text"],
+          additionalProperties: false,
+        },
       },
     };
     const baseDispatch = ctx.dispatch;
-    const rawDispatch = async (name, args) =>
-      name === "take_note" ? (this.session.addNote(args.text), "已记入笔记") : baseDispatch(name, args);
+    const rawDispatch = async (name, args, context = {}) =>
+      name === "take_note" ? (this.session.addNote(args.text), "已记入笔记") : baseDispatch(name, args, context);
 
     this.allTools = [...ctx.allTools, noteTool];
+    this.toolPolicies = new Map(ctx.toolPolicies);
+    this.toolPolicies.set("take_note", {
+      sideEffect: "memory-write", requiresApproval: false, parallelSafe: false,
+      idempotent: false, timeoutMs: 5_000, maxRetries: 0,
+    });
+    this.isParallelSafe = (name) => this.toolPolicies.get(name)?.parallelSafe === true;
     // 工具统一经 ToolRegistry：参数校验 + 失败分类 + 重试
-    this.registry = new ToolRegistry({ dispatch: rawDispatch, tools: this.allTools, onEvent: (ev) => this.bus.emit(ev) });
+    this.registry = new ToolRegistry({
+      dispatch: rawDispatch, tools: this.allTools, policies: this.toolPolicies,
+      onEvent: (ev) => this.bus.emit(ev),
+    });
 
     // ui 适配器：agent loop 的回调 → EventBus 事件
     let buf = "";
@@ -91,7 +107,13 @@ export class AgentRunner {
     const detail = name === "run_command" ? args.command : args.path ?? JSON.stringify(args);
     this.bus.emit({ type: "permission_request", id, name, detail });
     return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        this.bus.emit({ type: "permission_response", id, decision: "timeout" });
+        resolve(false);
+      }, Number(process.env.MINICODE_PERMISSION_TIMEOUT) || 300_000);
       this.pending.set(id, (decision) => {
+        clearTimeout(timer);
         if (decision === "a") this.sessionAllow.add(name);
         resolve(decision === "y" || decision === "a");
       });
@@ -106,7 +128,14 @@ export class AgentRunner {
     return true;
   }
 
-  interrupt() { this.currentAbort?.abort(); return true; }
+  interrupt() {
+    this.currentAbort?.abort();
+    for (const [id, decide] of this.pending) {
+      this.pending.delete(id);
+      decide("n");
+    }
+    return true;
+  }
 
   toolSummaries() {
     return (this.allTools || []).map((t) => {
@@ -163,6 +192,7 @@ export class AgentRunner {
     const before = t.messages.length;
     t.messages.length = 0;
     this.ctxTokens = 0;
+    this.planState?.clear();
     this.session.save();
     this.bus.emit({ type: "status", state: "idle", stop_reason: "cleared" });
     return { before, after: 0 };
@@ -170,6 +200,7 @@ export class AgentRunner {
 
   // 跑一次任务：goal → loop → idle
   async run(goal) {
+    if (this.currentAbort) return { ok: false, error: "该会话已有任务正在运行" };
     const msgs = this.session.messages;
     msgs.push({ role: "user", content: goal });
     this.bus.emit({ type: "run_start", goal });
@@ -179,8 +210,14 @@ export class AgentRunner {
       usage = await runAgentTurn(this.client, msgs, {
         model: this.model,
         tools: this.allTools,
-        dispatch: (n, a) => this.registry.run(n, a),
+        dispatch: (n, a, context) => this.registry.run(n, a, context),
         confirmNeeded: (n) => this.confirmNeeded(n),
+        parallelSafe: (n) => this.isParallelSafe(n),
+        statePrompt: this.statePrompt,
+        compactIfNeeded: async () => {
+          if (estimateTokens(msgs) <= this.compactAt) return false;
+          return (await this.compactNow("单轮执行中超阈值")).changed;
+        },
         ui: this.ui,
         signal: this.currentAbort.signal,
         system: this.systemPrompt + this.session.notesText(),
@@ -202,9 +239,17 @@ export class AgentRunner {
     this.tracer("llm", "out", { event: "turn", in: usage?.turnInput, out: usage?.turnOutput, tools: this.allTools.length });
     if (this.ctxTokens > this.compactAt) await this.compactNow("超阈值自动");
     this.session.save();
-    this.bus.emit({ type: "status", state: "idle", stop_reason: usage?.aborted ? "aborted" : "end_turn" });
+    this.bus.emit({
+      type: "status", state: "idle",
+      stop_reason: usage?.aborted ? "aborted" : usage?.stopped || "end_turn",
+    });
     this.bus.emit({ type: "run_end" });
-    return { ok: true, aborted: !!usage?.aborted, usage: { in: this.session.usage.in, out: this.session.usage.out, ctx: this.ctxTokens } };
+    return {
+      ok: true,
+      aborted: !!usage?.aborted,
+      stopped: usage?.stopped || "",
+      usage: { in: this.session.usage.in, out: this.session.usage.out, ctx: this.ctxTokens },
+    };
   }
 
   async close() { await this.mcp?.closeAll(); }

@@ -6,6 +6,8 @@
 //
 // 安全：子助手只拿到只读工具，不会改文件、不会执行命令。
 
+import { validateArgs } from "./core/registry.js";
+
 const SUB_SYSTEM = `你是一个只读调查子助手。用提供的只读工具（read_file/list_dir/grep/glob）
 去查清楚交给你的问题，然后用简洁的中文要点给出结论。
 不要尝试修改文件或执行命令——你只负责"查"和"答"。`;
@@ -18,12 +20,13 @@ const SUB_SYSTEM = `你是一个只读调查子助手。用提供的只读工具
  *   @param {Function} opts.dispatch    (name,args)=>Promise<string>
  *   @param {Function} opts.getSignal   ()=>AbortSignal|undefined
  *   @param {Function} opts.onStep      (name,args,label)=>void   展示子助手每一步（可选）
- * @returns {{ tools: Array, handlers: Object }}
+ * @returns {{ tools: Array, handlers: Object, policies: Map<string, Object> }}
  */
 export function makeSubagentTool({ client, model, tools, dispatch, getSignal, onStep }) {
   // 跑一个子助手到出结论。label 用于并行时区分是哪个子任务。
   async function runOne(task, label = "") {
     const messages = [{ role: "user", content: task }];
+    const schemas = new Map(tools.map((t) => [t.function.name, t.function.parameters]));
     for (let step = 0; step < 8; step++) { // 最多 8 步，防止打转
       const res = await client.chat.completions.create(
         { model, messages: [{ role: "system", content: SUB_SYSTEM }, ...messages], tools, stream: false },
@@ -34,10 +37,18 @@ export function makeSubagentTool({ client, model, tools, dispatch, getSignal, on
       if (!msg.tool_calls?.length) return msg.content || "(子助手没有给出结论)";
       for (const call of msg.tool_calls) {
         let args = {};
-        try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* 忽略 */ }
+        try { args = JSON.parse(call.function.arguments || "{}"); }
+        catch {
+          messages.push({ role: "tool", tool_call_id: call.id, content: "参数 JSON 解析失败，请修正后再调用" });
+          continue;
+        }
         onStep?.(call.function.name, args, label);
         let result;
-        try { result = await dispatch(call.function.name, args); }
+        try {
+          const errs = validateArgs(schemas.get(call.function.name), args);
+          if (errs.length) throw new Error(`参数校验失败：${errs.join("；")}`);
+          result = await dispatch(call.function.name, args, { signal: getSignal?.() });
+        }
         catch (e) { result = "出错：" + e.message; }
         messages.push({ role: "tool", tool_call_id: call.id, content: String(result).slice(0, 4000) });
       }
@@ -56,6 +67,7 @@ export function makeSubagentTool({ client, model, tools, dispatch, getSignal, on
         type: "object",
         properties: { task: { type: "string", description: "交给子助手的完整任务描述（越具体越好）" } },
         required: ["task"],
+        additionalProperties: false,
       },
     },
   };
@@ -73,10 +85,13 @@ export function makeSubagentTool({ client, model, tools, dispatch, getSignal, on
           tasks: {
             type: "array",
             items: { type: "string" },
+            minItems: 1,
+            maxItems: 4,
             description: "若干个互相独立的子任务描述，会被同时执行",
           },
         },
         required: ["tasks"],
+        additionalProperties: false,
       },
     },
   };
@@ -88,11 +103,17 @@ export function makeSubagentTool({ client, model, tools, dispatch, getSignal, on
     async spawn_agents({ tasks }) {
       const list = Array.isArray(tasks) ? tasks : [];
       if (!list.length) return "(没有提供子任务)";
+      if (list.length > 4) throw new Error("一次最多并行 4 个子任务，请拆分后再调用");
       // Promise.all 同时跑所有子助手 —— 真正的并行
       const results = await Promise.all(list.map((t, i) => runOne(t, `#${i + 1}`)));
       return list.map((t, i) => `### 子任务 ${i + 1}：${t}\n${results[i]}`).join("\n\n");
     },
   };
 
-  return { tools: [singleTool, manyTool], handlers };
+  const policies = new Map([
+    ["spawn_agent", { sideEffect: "none", requiresApproval: false, parallelSafe: true, idempotent: true, timeoutMs: 120_000, maxRetries: 1 }],
+    ["spawn_agents", { sideEffect: "none", requiresApproval: false, parallelSafe: false, idempotent: true, timeoutMs: 120_000, maxRetries: 1 }],
+  ]);
+
+  return { tools: [singleTool, manyTool], handlers, policies };
 }
