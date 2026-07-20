@@ -260,7 +260,7 @@ export const toolPolicies = new Map(/** @type {Array<[string, any]>} */ ([
   }],
   ["run_command", {
     sideEffect: "process", requiresApproval: true, parallelSafe: false,
-    idempotent: false, timeoutMs: 125_000, maxRetries: 0,
+    allowSessionApproval: false, idempotent: false, timeoutMs: 125_000, maxRetries: 0,
     validateResult: nonEmptyText,
     // 命令只作为文件检查点的验证边界；命令自身及外部副作用不在回滚范围内。
     settlesCheckpoint: true,

@@ -20,14 +20,14 @@
 - Plan 模式：复杂任务通过 `update_plan` 保存结构化步骤、验收条件和证据。
 - 结构化结果：CLI/TUI 可选择预定义输出契约，任务完成后使用 `response_format` 收尾，并执行本地 Schema 校验和限次修复。
 - 工作目录沙箱：文件工具只能访问 `MINICODE_WORKSPACE` 内部路径。
-- 权限审批：写文件、改文件、执行命令、MCP 工具执行前需要确认；支持本会话放行和自动批准模式。
-- MCP：读取 `mcp.json`，连接本地或外部 MCP server，并把 MCP 工具转成模型可调用的 function tool。
+- 权限审批：按工具副作用和 MCP annotations 区分只读/写入；高风险工具不能会话级永久放行。
+- MCP：支持 stdio 与 Streamable HTTP、分页工具发现、Resources 发现/读取，并保留 `structuredContent`。
 - 子 agent：`spawn_agent` / `spawn_agents` 使用只读工具做独立调查，支持并行。
 - Skills：从 `skills/<name>/SKILL.md` 加载技能索引，模型需要时再用 `use_skill` 读取完整说明。
 - 会话持久化：保存到 `.sessions/`，支持恢复、列表和 replay。
 - 上下文压缩：历史太长时可把旧对话压缩成摘要。
 - 漂移控制：每轮固定注入原始目标和当前计划；长任务可在执行中压缩，摘要保留失败方案和验证证据。
-- daemon 事件流：把 token、工具调用、权限请求、重试、usage、错误等都结构化成事件。
+- 审计链路：工具调用通过 `executionId` 关联调用、审批、重试和结果，参数写盘前会脱敏；daemon 写入 `.events.jsonl`，单进程入口写入 `.audit.jsonl`。
 - trace 回放：记录 IPC / EventBus / LLM 三层时间线，方便复盘。
 
 
@@ -247,7 +247,7 @@ npm run replay sess-20260625-212012
 
 ## MCP
 
-`mcp.json` 使用类似 Claude Desktop/Code 的配置格式：
+`mcp.json` 支持本地 stdio 和远程 Streamable HTTP。stdio 示例：
 
 ```json
 {
@@ -267,13 +267,48 @@ npm run replay sess-20260625-212012
 }
 ```
 
-启动时 `src/mcp.js` 会连接这些 server，调用 `listTools()`，并把工具命名成：
+HTTP 示例（`${MCP_TOKEN}` 在运行时从环境变量展开）：
+
+```json
+{
+  "mcpServers": {
+    "knowledge": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_TOKEN}"
+      },
+      "timeoutMs": 60000,
+      "approval": "writes",
+      "toolApproval": {
+        "publish_document": "always"
+      }
+    }
+  }
+}
+```
+
+`approval` 和单工具覆盖 `toolApproval` 可取：
+
+- `writes`：默认值；`readOnlyHint: true` 直接执行，写入或未知工具审批。
+- `always`：所有工具审批。
+- `never`：宿主不审批；只应对已经由服务端权限系统充分保护的 Server 使用。
+
+启动时 `src/mcp.js` 会按游标分页调用 `listTools()`，并把发现的工具命名成：
 
 ```text
 mcp__<server>__<tool>
 ```
 
-所有 MCP 工具默认需要权限审批。
+工具返回会保留原始 `content`、`structuredContent` 和 `_meta`，再由统一 Registry 序列化后交给模型。
+
+如果 Server 声明 Resources 能力，minicode 额外提供两个只读桥接工具：
+
+- `list_mcp_resources({server})`：动态列出 Resources 和 Resource Templates。
+- `read_mcp_resource({server, uri})`：读取真实 URI 对应的内容。
+
+Resources 不会整批塞进系统 Prompt；Agent 需要时先发现、再按 URI 读取。当前 HTTP 支持静态 Header/Bearer Token；需要浏览器交互的 OAuth 授权流程尚未实现。
+
+本项目默认发现并暴露 Server 返回的全部工具，没有静态 `allowedTools`。如果未来需要减少上下文，应实现运行时工具目录和动态启用；部署级禁用则应通过 Server 自身 toolset、账号权限或独立配置控制，不应把“工具发现”和“永久 allowlist”混为一谈。
 
 ## 测试
 
@@ -319,6 +354,8 @@ npm run benchmark
 - daemon 模式 Session。
 - 工作目录沙箱。
 - IPC 权限审批联调：假模型触发 `write_file`，客户端通过 `permission.respond` 批准，runner 继续写入文件。
+- stdio/Streamable HTTP MCP 发现与调用、HTTP Header 环境变量、Resources 发现/读取和 `structuredContent` 保留。
+- MCP annotations 权限策略，以及审计 ID 在工具调用、审批和结果之间的关联。
 
 
 

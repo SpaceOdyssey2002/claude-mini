@@ -42,7 +42,8 @@ function render(ev) {
       console.log(paint(c.dim, `     ↳ 子助手${ev.label || ""} ${ev.name} ${ev.arg || ""}`)); break;
     case "permission_request":
       stopSpinner();
-      console.log(paint(c.yellow, `\n  ⚠ 请求 ${ev.name} → ${ev.detail}`) + paint(c.dim, "  [y]是 [a]不再问 [n]否")); break;
+      console.log(paint(c.yellow, `\n  ⚠ 请求 ${ev.name} → ${ev.detail}`) + paint(c.dim,
+        ev.rememberAllowed ? "  [y]是 [a]不再问 [n]否" : "  [y]是 [n]否（高风险操作不可会话放行）")); break;
     case "retry":
       console.log(paint(c.yellow, `  ↻ 重试 ${ev.name}（${ev.reason}）`)); break;
     case "compaction":
@@ -65,7 +66,7 @@ function render(ev) {
         paint(c.bold, "MCP 服务器"),
         ...(ev.res.status.length ? ev.res.status.map((s) =>
           s.ok
-            ? `${paint(c.green, "●")} ${s.name}  ${s.toolCount} 个工具  ${paint(c.dim, (s.tools || []).join(", "))}`
+            ? `${paint(c.green, "●")} ${s.name}  ${s.transport || "stdio"} · ${s.toolCount} 个工具 · ${s.resourceCount || 0} 个资源  ${paint(c.dim, (s.tools || []).join(", "))}`
             : `${paint(c.red, "●")} ${s.name}  ${paint(c.dim, s.error || "连接失败")}`
         ) : [paint(c.dim, "未配置 MCP 服务器")]),
       ], { color: c.gray })); break;

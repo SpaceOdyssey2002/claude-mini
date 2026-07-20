@@ -15,6 +15,7 @@ import { loadSkills, skillsSection, makeSkillTool } from "./skills.js";
 import { newSessionId, saveSession, loadSession, listSessions } from "./session.js";
 import { buildAgentContext } from "./setup.js";
 import { ToolRegistry } from "./core/registry.js";
+import { appendAuditEvent, auditArgs, auditArgsHash, auditPreview } from "./core/audit.js";
 import * as ui from "./ui.js";
 
 const { c, paint } = ui;
@@ -97,6 +98,7 @@ async function main() {
     policies: toolPolicies,
     checkpointManager,
     onEvent: (ev) => {
+      if (ev.executionId) appendAuditEvent(currentSessionId, ev);
       if (ev.type === "retry") console.log(paint(c.yellow, `  ↻ ${ev.name} 第 ${ev.attempt} 次重试：${ev.message}`));
       if (ev.type === "rollback") console.log(paint(c.yellow, `  ↶ 已回滚文件：${[...ev.restored, ...ev.removed].join(", ") || "（无变更）"}`));
       if (ev.type === "rollback_conflict") console.log(paint(c.red, `  ⚠ 文件回滚存在冲突：${ev.conflicts.map((item) => item.path).join(", ")}`));
@@ -109,7 +111,7 @@ async function main() {
     else { console.log(paint(c.dim, "\n再见！")); mcp.closeAll().finally(() => process.exit(0)); }
   });
 
-  // 3) 权限策略：写操作和所有 MCP 工具默认需确认；用户可选"本会话不再询问"
+  // 3) 权限策略：内置/MCP 都按工具 policy 判断；高风险工具不能被会话级永久放行。
   const sessionAllow = new Set();
   function confirmNeeded(name) {
     if (process.env.MINICODE_YES) return false; // 自动批准模式
@@ -136,7 +138,10 @@ async function main() {
     onTextEnd() {
       if (streaming) { stdout.write("\n"); streaming = false; }
     },
-    onToolUse(name, args) {
+    onToolUse(name, args, audit = {}) {
+      appendAuditEvent(currentSessionId, {
+        type: "tool_use", name, args: auditArgs(args), argsSha256: auditArgsHash(args), ...audit,
+      });
       const isSub = name === "spawn_agent" || name === "spawn_agents";
       const label = isSub ? paint(c.cyan, "🤖 " + name)
         : mcp.isMcpTool(name) ? paint(c.blue, name) : paint(c.magenta, name);
@@ -154,22 +159,36 @@ async function main() {
         console.log(paint(c.green, ui.indent(ui.truncate(args.content, 300), "  + ")));
       }
     },
-    onToolResult(name, result, { isError }) {
+    onToolResult(name, result, { isError, ...audit }) {
+      appendAuditEvent(currentSessionId, {
+        type: "tool_result", name, ok: !isError, preview: auditPreview(result), ...audit,
+      });
       const head = isError ? paint(c.red, "  ↳ ") : paint(c.dim, "  ↳ ");
       console.log(head + ui.indent(ui.truncate(result, 800)).trimStart());
     },
-    async confirm(name, args) {
+    async confirm(name, args, audit = {}) {
       const detail =
         name === "run_command" ? args.command :
         name === "grep" || name === "glob" ? args.pattern :
         args.path ?? JSON.stringify(args);
+      const rememberAllowed = toolPolicies.get(name)?.allowSessionApproval !== false;
+      const permissionId = `permission-${audit.executionId || Date.now()}`;
+      appendAuditEvent(currentSessionId, {
+        type: "permission_request", id: permissionId, name,
+        detail: auditArgs(args), rememberAllowed, ...audit,
+      });
       const ans = (await ask(
         paint(c.yellow, `  ⚠ 允许 ${name} → ${detail} ?  `) +
-        paint(c.dim, "[y]是 [a]是且不再问 [n]否 ")
+        paint(c.dim, rememberAllowed ? "[y]是 [a]是且不再问 [n]否 " : "[y]单次允许 [n]否 ")
       )) ?? "";
       const k = ans.trim().toLowerCase();
-      if (k === "a") { sessionAllow.add(name); return true; }
-      return k === "y";
+      const effective = k === "a" && !rememberAllowed ? "y" : k;
+      if (effective === "a") sessionAllow.add(name);
+      appendAuditEvent(currentSessionId, {
+        type: "permission_response", id: permissionId, name, decision: effective,
+        ...(effective !== k ? { requestedDecision: k } : {}), ...audit,
+      });
+      return effective === "y" || effective === "a";
     },
   };
 
@@ -362,7 +381,8 @@ function printMcp(mcp) {
   }
   const lines = [paint(c.bold, "MCP 服务器")];
   for (const s of mcp.status) {
-    if (s.ok) lines.push(paint(c.green, "● ") + s.name + paint(c.dim, `  ${s.toolCount} 个工具: ${s.tools.join(", ")}`));
+    if (s.ok) lines.push(paint(c.green, "● ") + s.name + paint(c.dim,
+      `  ${s.transport || "stdio"} · ${s.toolCount} 个工具 · ${s.resourceCount || 0} 个资源 · ${s.resourceTemplateCount || 0} 个模板: ${s.tools.join(", ")}`));
     else lines.push(paint(c.red, "● ") + s.name + paint(c.dim, `  连接失败: ${s.error}`));
   }
   console.log(ui.box(lines, { color: c.gray }));

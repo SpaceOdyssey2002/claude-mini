@@ -204,7 +204,10 @@ export class ToolRegistry {
         err.classification = cls.kind;
         err.retryable = cls.retryable && policy.idempotent !== false;
         if (err.retryable && attempt < retries) {
-          this.onEvent({ type: "retry", name, attempt: attempt + 1, reason: cls.kind, message: err.message });
+          this.onEvent({
+            type: "retry", name, attempt: attempt + 1, reason: cls.kind, message: err.message,
+            executionId: context.executionId, toolCallId: context.toolCallId,
+          });
           const base = 300 * (2 ** attempt);
           const jitter = Math.floor(Math.random() * 100);
           await sleep(base + jitter, context.signal);

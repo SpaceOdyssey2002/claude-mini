@@ -26,7 +26,7 @@ export async function buildAgentContext({ client, model, getSignal, onSubStep })
     if (name === "update_plan") return planHandler(args);
     if (name === "use_skill") return skillHandler(args);
     if (subHandlers[name]) return subHandlers[name](args);
-    if (mcp.isMcpTool(name)) return mcp.callTool(name, args, context);
+    if (mcp.isMcpTool(name)) return mcp.call(name, args, context);
     if (handlers[name]) return handlers[name](args, context);
     throw new Error(`未知工具：${name}`);
   }
