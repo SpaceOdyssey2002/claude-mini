@@ -12,9 +12,10 @@ import { frame, createLineParser, rpc, dispatchRpc } from "../src/core/rpc.js";
 import { EventBus } from "../src/core/eventbus.js";
 import { Session } from "../src/core/memory.js";
 import { estimateTokens, compact } from "../src/context.js";
-import { handlers, setWorkspace, getWorkspace } from "../src/tools.js";
+import { handlers, setWorkspace, getWorkspace, tools, toolPolicies } from "../src/tools.js";
 import { runAgentTurn } from "../src/agent.js";
 import { PlanState } from "../src/plan.js";
+import { FileCheckpointManager } from "../src/core/checkpoint.js";
 
 // ── ToolRegistry：参数校验 ──
 test("validateArgs 缺必填参数报错", () => {
@@ -87,6 +88,108 @@ test("run_command 非零退出码会抛错而不是伪装成功", async () => {
     () => handlers.run_command({ command: 'node -e "process.exit(2)"' }),
     /命令执行失败/
   );
+});
+
+function makeFileRegistry(root, events = []) {
+  return new ToolRegistry({
+    tools,
+    policies: toolPolicies,
+    checkpointManager: new FileCheckpointManager({ root }),
+    onEvent: (event) => events.push(event),
+    dispatch: (name, args, context) => handlers[name](args, context),
+  });
+}
+
+test("验证命令失败会回滚同批文件修改和新建文件", async () => {
+  const oldWorkspace = getWorkspace();
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-rollback-"));
+  const events = [];
+  try {
+    setWorkspace(temp);
+    await fs.writeFile(path.join(temp, "value.js"), "export const value = 1;\n", "utf8");
+    const registry = makeFileRegistry(temp, events);
+
+    await registry.run("edit_file", {
+      path: "value.js", old_str: "value = 1", new_str: "value = 2",
+    });
+    await registry.run("write_file", {
+      path: "generated.txt", content: "temporary\n", create_only: true,
+    });
+
+    await assert.rejects(
+      () => registry.run("run_command", { command: 'node -e "process.exit(2)"' }),
+      (error) => {
+        const failure = /** @type {any} */ (error);
+        assert.deepEqual(failure.rollback.restored, ["value.js"]);
+        assert.deepEqual(failure.rollback.removed, ["generated.txt"]);
+        assert.deepEqual(failure.rollback.conflicts, []);
+        return true;
+      }
+    );
+    assert.equal(await fs.readFile(path.join(temp, "value.js"), "utf8"), "export const value = 1;\n");
+    await assert.rejects(() => fs.access(path.join(temp, "generated.txt")), /ENOENT/);
+    assert.ok(events.some((event) => event.type === "rollback"));
+  } finally {
+    setWorkspace(oldWorkspace);
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("回滚前的 SHA-256 冲突检测不会覆盖外部修改", async () => {
+  const oldWorkspace = getWorkspace();
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-rollback-conflict-"));
+  try {
+    setWorkspace(temp);
+    const target = path.join(temp, "value.js");
+    await fs.writeFile(target, "export const value = 1;\n", "utf8");
+    const registry = makeFileRegistry(temp);
+
+    await registry.run("edit_file", {
+      path: "value.js", old_str: "value = 1", new_str: "value = 2",
+    });
+    await fs.writeFile(target, "export const value = 99; // external\n", "utf8");
+
+    await assert.rejects(
+      () => registry.run("run_command", { command: 'node -e "process.exit(2)"' }),
+      (error) => {
+        const failure = /** @type {any} */ (error);
+        assert.equal(failure.rollback.conflicts.length, 1);
+        assert.equal(failure.rollback.conflicts[0].path, "value.js");
+        return true;
+      }
+    );
+    assert.equal(await fs.readFile(target, "utf8"), "export const value = 99; // external\n");
+  } finally {
+    setWorkspace(oldWorkspace);
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("验证成功会提交检查点，异常结束只回滚后续未验证修改", async () => {
+  const oldWorkspace = getWorkspace();
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "minicode-checkpoint-commit-"));
+  try {
+    setWorkspace(temp);
+    const target = path.join(temp, "value.js");
+    await fs.writeFile(target, "export const value = 1;\n", "utf8");
+    const registry = makeFileRegistry(temp);
+
+    await registry.run("edit_file", {
+      path: "value.js", old_str: "value = 1", new_str: "value = 2",
+    });
+    await registry.run("run_command", { command: 'node -e "console.log(\'PASS\')"' });
+    await registry.run("edit_file", {
+      path: "value.js", old_str: "value = 2", new_str: "value = 3",
+    });
+    const finish = await registry.finishRun({ success: false, reason: "later_failure" });
+
+    assert.equal(finish.attempted, true);
+    assert.deepEqual(finish.restored, ["value.js"]);
+    assert.equal(await fs.readFile(target, "utf8"), "export const value = 2;\n");
+  } finally {
+    setWorkspace(oldWorkspace);
+    await fs.rm(temp, { recursive: true, force: true });
+  }
 });
 
 test("主 Agent 重复相同观察后先恢复再由 LoopGuard 受控收尾", async () => {

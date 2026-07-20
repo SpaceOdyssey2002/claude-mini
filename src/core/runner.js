@@ -73,6 +73,7 @@ export class AgentRunner {
     // 工具统一经 ToolRegistry：参数校验 + 失败分类 + 重试
     this.registry = new ToolRegistry({
       dispatch: rawDispatch, tools: this.allTools, policies: this.toolPolicies,
+      checkpointManager: ctx.checkpointManager,
       onEvent: (ev) => this.bus.emit(ev),
     });
 
@@ -222,7 +223,12 @@ export class AgentRunner {
         signal: this.currentAbort.signal,
         system: this.systemPrompt + this.session.notesText(),
       });
+      await this.registry.finishRun({
+        success: !usage?.aborted && !usage?.stopped,
+        reason: usage?.aborted ? "aborted" : usage?.stopped || "end_turn",
+      });
     } catch (e) {
+      await this.registry.finishRun({ success: false, reason: "agent_error" });
       this.bus.emit({ type: "error", message: e.message });
       if (msgs.at(-1)?.role === "user") msgs.pop();
       this.bus.emit({ type: "status", state: "idle", stop_reason: "error" });

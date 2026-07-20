@@ -15,6 +15,7 @@
 - 内置工具：读文件、列目录、搜索、glob、写文件、精确编辑、执行命令。
 - 工具治理：更严格的嵌套参数约束、逐工具超时、结构化错误，以及仅对幂等操作执行 transient 重试。
 - 错误恢复：重复调用、连续失败或无进展时自动回到已验证事实并限次重规划。
+- 文件检查点：同一批 `write_file`/`edit_file` 在验证命令失败时恢复原文件或删除新建文件；回滚前用 SHA-256 检测并发修改冲突。
 - LoopGuard：限制模型迭代、工具总数、重复观察、连续错误和单轮总时长，触发后受控收尾。
 - Plan 模式：复杂任务通过 `update_plan` 保存结构化步骤、验收条件和证据。
 - 工作目录沙箱：文件工具只能访问 `MINICODE_WORKSPACE` 内部路径。
@@ -53,6 +54,7 @@ minicode/
       rpc.js              # JSON-RPC over NDJSON 分帧与分发
       eventbus.js         # 结构化事件总线与 events.jsonl
       registry.js         # 工具参数校验、错误分类、短暂错误重试
+      checkpoint.js       # 文件 pre-image 检查点、验证失败回滚和哈希冲突保护
       memory.js           # daemon 模式的分层会话：session / thread / notes
       trace.js            # IPC / EventBus / LLM 三层 trace
 
@@ -221,6 +223,11 @@ npm test
 npm run typecheck
 ```
 
+文件回滚采用受限事务语义：第一次 `write_file`/`edit_file` 打开一个内存检查点，后续文件修改
+加入同一批次；`run_command` 成功即提交，失败则回滚整批。回合中断、LoopGuard 停止或模型调用
+异常时也回滚未提交批次。命令自身、MCP、数据库和网络等外部副作用不在回滚范围内；如果文件
+在 Agent 写入后又被用户或其他进程修改，哈希冲突检测会拒绝覆盖。
+
 ## 端到端 Benchmark
 
 基准包含 12 项隔离工作区任务，使用文件内容、JSON、修改范围和测试退出码做机器验收，
@@ -243,6 +250,7 @@ npm run benchmark
 - 工具参数校验。
 - 错误分类。
 - 幂等 transient 重试与非幂等禁止重试。
+- 文件批次回滚、创建文件撤销、验证成功提交和 SHA-256 冲突保护。
 - 主 Agent 重复观察后的自动恢复和 LoopGuard 收尾。
 - Plan 状态约束。
 - 单回合上下文压缩。

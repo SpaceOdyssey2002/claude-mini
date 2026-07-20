@@ -127,17 +127,27 @@ export class ToolRegistry {
    *   @param {Map<string, Object>|Object} [opts.policies] 工具策略
    *   @param {number}   [opts.maxRetries=2]
    *   @param {Function} [opts.onEvent]  (ev)=>void  重试等事件回调
+   *   @param {Object}   [opts.checkpointManager] 文件检查点管理器
    */
-  constructor({ dispatch, tools = [], policies = new Map(), maxRetries = 2, onEvent }) {
+  constructor({ dispatch, tools = [], policies = new Map(), maxRetries = 2, onEvent, checkpointManager }) {
     this.dispatch = dispatch;
     this.maxRetries = maxRetries;
     this.onEvent = onEvent || (() => {});
+    this.checkpointManager = checkpointManager;
+    if (this.checkpointManager) this.checkpointManager.onEvent = this.onEvent;
     this.policies = policies instanceof Map ? policies : new Map(Object.entries(policies || {}));
     this.schemas = new Map();
     for (const t of tools || []) this.schemas.set(t.function.name, t.function.parameters);
   }
 
   setTools(tools) { for (const t of tools) this.schemas.set(t.function.name, t.function.parameters); }
+
+  async finishRun({ success = true, reason = success ? "end_turn" : "run_failed" } = {}) {
+    if (!this.checkpointManager?.hasActive()) return { attempted: false, reason };
+    return success
+      ? this.checkpointManager.commit(reason)
+      : this.checkpointManager.rollback(reason);
+  }
 
   async run(name, args, context = {}) {
     // 1. 参数校验
@@ -152,6 +162,12 @@ export class ToolRegistry {
     const policy = this.policies.get(name) || {};
     const timeoutMs = policy.timeoutMs || 60_000;
     const retries = policy.idempotent === false ? 0 : (policy.maxRetries ?? this.maxRetries);
+    const checkpointPaths = typeof policy.checkpointPaths === "function"
+      ? policy.checkpointPaths(args) || []
+      : [];
+    if (this.checkpointManager && checkpointPaths.length) {
+      await this.checkpointManager.capture(checkpointPaths);
+    }
     let lastErr;
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
@@ -172,9 +188,18 @@ export class ToolRegistry {
             });
           }
         }
+        if (this.checkpointManager && checkpointPaths.length) {
+          await this.checkpointManager.recordPost(checkpointPaths);
+        }
+        if (this.checkpointManager && policy.settlesCheckpoint) {
+          await this.checkpointManager.commit(`${name}_succeeded`);
+        }
         return typeof result === "string" ? result : JSON.stringify(result);
       } catch (err) {
         lastErr = err;
+        if (this.checkpointManager && checkpointPaths.length) {
+          await this.checkpointManager.recordPost(checkpointPaths);
+        }
         const cls = classifyError(err);
         err.classification = cls.kind;
         err.retryable = cls.retryable && policy.idempotent !== false;
@@ -184,6 +209,17 @@ export class ToolRegistry {
           const jitter = Math.floor(Math.random() * 100);
           await sleep(base + jitter, context.signal);
           continue;
+        }
+        if (this.checkpointManager && (checkpointPaths.length || policy.settlesCheckpoint)) {
+          const rollback = await this.checkpointManager.rollback(`${name}_failed`);
+          if (rollback.attempted) {
+            err.rollback = rollback;
+            const changed = rollback.restored.length + rollback.removed.length;
+            const summary = rollback.conflicts.length
+              ? `文件回滚完成 ${changed} 项，另有 ${rollback.conflicts.length} 个冲突未覆盖`
+              : `已从检查点回滚 ${changed} 个文件`;
+            err.message = `${err.message}\n${summary}`;
+          }
         }
         throw err;
       }

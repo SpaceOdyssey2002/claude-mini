@@ -82,7 +82,7 @@ async function main() {
   const stop = ui.startSpinner("连接 MCP 服务器");
   const {
     mcp, dispatch, allTools, skills, systemPrompt, baseConfirmNeeded,
-    isParallelSafe, toolPolicies, statePrompt, planState,
+    isParallelSafe, toolPolicies, statePrompt, planState, checkpointManager,
   } = await buildAgentContext({
     client, model: MODEL,
     getSignal: () => currentAbort?.signal,
@@ -95,8 +95,11 @@ async function main() {
     dispatch,
     tools: allTools,
     policies: toolPolicies,
+    checkpointManager,
     onEvent: (ev) => {
       if (ev.type === "retry") console.log(paint(c.yellow, `  ↻ ${ev.name} 第 ${ev.attempt} 次重试：${ev.message}`));
+      if (ev.type === "rollback") console.log(paint(c.yellow, `  ↶ 已回滚文件：${[...ev.restored, ...ev.removed].join(", ") || "（无变更）"}`));
+      if (ev.type === "rollback_conflict") console.log(paint(c.red, `  ⚠ 文件回滚存在冲突：${ev.conflicts.map((item) => item.path).join(", ")}`));
     },
   });
 
@@ -294,6 +297,10 @@ async function main() {
         signal: currentAbort.signal,
         system: systemPrompt,
       });
+      await registry.finishRun({
+        success: !usage?.aborted && !usage?.stopped,
+        reason: usage?.aborted ? "aborted" : usage?.stopped || "end_turn",
+      });
       if (usage?.aborted) console.log(paint(c.yellow, "\n  ⎋ 已中断当前回合"));
       if (usage) {
         sessionIn += usage.turnInput || 0;
@@ -305,6 +312,7 @@ async function main() {
       if (ctxTokens > COMPACT_AT) await doCompact("超过阈值，自动");
       saveCurrent(); // 每轮自动保存会话
     } catch (err) {
+      await registry.finishRun({ success: false, reason: "agent_error" });
       if (spinnerStop) { spinnerStop(); spinnerStop = null; }
       streaming = false;
       console.error(paint(c.red, `\n✗ 出错：${err.message}`));
