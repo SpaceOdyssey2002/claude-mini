@@ -43,7 +43,7 @@ export function loadSkills() {
     out.push({ name: meta.name || d.name, description: meta.description || "", body });
   }
   return out;
-}
+} // loadSkills 读取出三个部分：name，description，body
 
 // 生成注入系统提示的"技能清单"段落
 export function skillsSection(skills) {
@@ -62,8 +62,15 @@ export function makeSkillTool(skills) {
       description: "加载一个技能的完整操作说明。当任务匹配某个已列出的技能时，先调用它获取详细指引再动手。",
       parameters: {
         type: "object",
-        properties: { name: { type: "string", description: "技能名称" } },
+        properties: {
+          name: {
+            type: "string",
+            enum: [...byName.keys()],
+            description: "技能名称，必须是系统提示列出的可用技能之一",
+          },
+        },
         required: ["name"],
+        additionalProperties: false,
       },
     },
   };
@@ -72,5 +79,9 @@ export function makeSkillTool(skills) {
     if (!s) return `没有名为 '${name}' 的技能。可用技能：${[...byName.keys()].join(", ") || "（无）"}`;
     return s.body;
   }
-  return { tool, handler };
+  const policy = {
+    sideEffect: "none", requiresApproval: false, parallelSafe: true,
+    idempotent: true, timeoutMs: 5_000, maxRetries: 0,
+  };
+  return { tool, handler, policy };
 }

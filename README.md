@@ -13,6 +13,10 @@
 
 - 流式对话：边生成边输出，支持中途 Ctrl+C 中断。
 - 内置工具：读文件、列目录、搜索、glob、写文件、精确编辑、执行命令。
+- 工具治理：更严格的嵌套参数约束、逐工具超时、结构化错误，以及仅对幂等操作执行 transient 重试。
+- 错误恢复：重复调用、连续失败或无进展时自动回到已验证事实并限次重规划。
+- LoopGuard：限制模型迭代、工具总数、重复观察、连续错误和单轮总时长，触发后受控收尾。
+- Plan 模式：复杂任务通过 `update_plan` 保存结构化步骤、验收条件和证据。
 - 工作目录沙箱：文件工具只能访问 `MINICODE_WORKSPACE` 内部路径。
 - 权限审批：写文件、改文件、执行命令、MCP 工具执行前需要确认；支持本会话放行和自动批准模式。
 - MCP：读取 `mcp.json`，连接本地或外部 MCP server，并把 MCP 工具转成模型可调用的 function tool。
@@ -20,6 +24,7 @@
 - Skills：从 `skills/<name>/SKILL.md` 加载技能索引，模型需要时再用 `use_skill` 读取完整说明。
 - 会话持久化：保存到 `.sessions/`，支持恢复、列表和 replay。
 - 上下文压缩：历史太长时可把旧对话压缩成摘要。
+- 漂移控制：每轮固定注入原始目标和当前计划；长任务可在执行中压缩，摘要保留失败方案和验证证据。
 - daemon 事件流：把 token、工具调用、权限请求、重试、usage、错误等都结构化成事件。
 - trace 回放：记录 IPC / EventBus / LLM 三层时间线，方便复盘。
 
@@ -38,6 +43,7 @@ minicode/
     subagent.js           # spawn_agent / spawn_agents
     skills.js             # Skills 加载与 use_skill 工具
     context.js            # token 粗估与上下文压缩
+    plan.js               # 结构化 Plan 状态、步骤验收条件和证据约束
     session.js            # 旧单进程 REPL 的扁平会话存储
     ui.js                 # ANSI 终端渲染
 
@@ -215,11 +221,33 @@ npm test
 npm run typecheck
 ```
 
+## 端到端 Benchmark
+
+基准包含 12 项隔离工作区任务，使用文件内容、JSON、修改范围和测试退出码做机器验收，
+统计任务完成率、参数合法率、工具选择/执行成功率、错误恢复率、平均工具调用数和 token。
+
+```powershell
+# 离线自检评测链路（不能作为模型成绩）
+npm run benchmark:mock
+
+# 真实模型，每项重复 3 次
+$env:DEEPSEEK_API_KEY = "sk-..."
+npm run benchmark
+```
+
+报告写入 `benchmark/results/*.json` 和 `*.md`。简历只能引用 `real` 模式结果。
+
 当前测试覆盖：
 
 - JSON-RPC 分帧和分发。
 - 工具参数校验。
 - 错误分类。
+- 幂等 transient 重试与非幂等禁止重试。
+- 主 Agent 重复观察后的自动恢复和 LoopGuard 收尾。
+- Plan 状态约束。
+- 单回合上下文压缩。
+- glob 的 `**/` 零层/多层匹配。
+- 命令非零退出码错误语义。
 - EventBus。
 - daemon 模式 Session。
 - 工作目录沙箱。
@@ -239,6 +267,14 @@ npm run typecheck
 | `MINICODE_PORT`       | daemon/client 模式 TCP 端口，默认 `47800` |
 | `MINICODE_COMPACT_AT` | 超过多少 prompt token 后自动压缩，默认 `40000` |
 | `MINICODE_TOOL_CAP`   | 单个工具结果回喂模型的最大字符数，默认 `8000`         |
+| `MINICODE_MAX_ITERATIONS` | 单轮最多模型迭代数，默认 `12` |
+| `MINICODE_MAX_TOOL_CALLS` | 单轮最多工具调用数，默认 `30` |
+| `MINICODE_MAX_SAME_CALL` | 相同工具与参数的触发阈值，默认 `3` |
+| `MINICODE_MAX_SAME_RESULT` | 相同工具结果的无进展阈值，默认 `3` |
+| `MINICODE_MAX_CONSECUTIVE_ERRORS` | 连续工具错误阈值，默认 `3` |
+| `MINICODE_MAX_RECOVERY_ATTEMPTS` | 自动恢复/重规划次数，默认 `2` |
+| `MINICODE_RUN_TIMEOUT` | 单轮总时长上限（毫秒），默认 `600000` |
+| `MINICODE_PERMISSION_TIMEOUT` | daemon 权限审批等待上限（毫秒），默认 `300000` |
 
 
 

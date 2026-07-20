@@ -41,6 +41,7 @@ export class McpManager {
     this.clients = new Map();   // serverName -> Client
     this.routes = new Map();    // 命名工具名 -> { server, originalName }
     this.tools = [];            // OpenAI function 格式，喂给模型
+    this.policies = new Map();  // 工具运行策略：审批/并发/幂等/超时
     this.status = [];           // 给 /mcp 命令展示的状态
   }
 
@@ -65,6 +66,16 @@ export class McpManager {
           const safe = name.replace(/[^a-zA-Z0-9_-]/g, "_");
           const fqName = `mcp__${safe}__${t.name}`;
           this.routes.set(fqName, { server: name, originalName: t.name });
+          const readOnly = t.annotations?.readOnlyHint === true;
+          const idempotent = readOnly || t.annotations?.idempotentHint === true;
+          this.policies.set(fqName, {
+            sideEffect: readOnly ? "external-read" : "external-unknown",
+            requiresApproval: true,
+            parallelSafe: readOnly,
+            idempotent,
+            timeoutMs: 60_000,
+            maxRetries: idempotent ? 2 : 0,
+          });
           this.tools.push({
             type: "function",
             function: {
@@ -87,11 +98,16 @@ export class McpManager {
   }
 
   // 路由一次 MCP 工具调用，返回字符串结果
-  async callTool(name, args) {
+  async callTool(name, args, context = {}) {
     const route = this.routes.get(name);
     if (!route) throw new Error(`未知的 MCP 工具：${name}`);
     const client = this.clients.get(route.server);
-    const res = await client.callTool({ name: route.originalName, arguments: args || {} });
+    const policy = this.policies.get(name) || {};
+    const res = await client.callTool(
+      { name: route.originalName, arguments: args || {} },
+      undefined,
+      { signal: context.signal, timeout: policy.timeoutMs || 60_000 }
+    );
     // 把返回的 content 块拼成文本
     const text = (res.content || [])
       .map((b) => (b.type === "text" ? b.text : `[${b.type}]`))
