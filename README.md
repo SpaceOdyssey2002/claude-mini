@@ -31,6 +31,15 @@ agent loop。为保持旧用法兼容，未指定时默认选择 DeepSeek。
 - 审计链路：工具调用通过 `executionId` 关联调用、审批、重试和结果，参数写盘前会脱敏；daemon 写入 `.events.jsonl`，单进程入口写入 `.audit.jsonl`。
 - trace 回放：记录 IPC / EventBus / LLM 三层时间线，方便复盘。
 
+## 文档
+
+- [架构图](docs/architecture.md)：系统组件、调用链路和安全边界。
+- [架构概览](docs/架构概览.md)：用简洁示例说明一次任务的完整执行流程。
+- [工具手册](docs/工具手册.md)：工具描述、参数、返回值、权限与边界。
+- [实现说明](docs/实现说明.md)：按模块阅读源码和实现细节。
+- [简历项目描述](docs/简历项目描述.md)：项目亮点与量化结果的简历写法。
+- [面试问题清单](docs/面试问题清单.md)：围绕该项目的常见面试问题与回答思路。
+
 
 
 ## 目录结构
@@ -74,6 +83,7 @@ minicode/
 
   skills/                 # 本地 Skills
   mcp-servers/            # 示例 MCP server
+  docs/                   # 架构、工具、实现、简历与面试文档
   playground/             # 演示工作目录
   .sessions/              # 运行时会话、事件、trace 输出
   mcp.json                # MCP server 配置
