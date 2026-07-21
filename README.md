@@ -324,8 +324,8 @@ HTTP 示例（`${MCP_TOKEN}` 在运行时从环境变量展开）：
 
 `approval` 和单工具覆盖 `toolApproval` 可取：
 
-- `writes`：默认值；`readOnlyHint: true` 直接执行，写入或未知工具审批。
-- `always`：所有工具审批。
+- `always`：默认值；所有外部 MCP 工具逐次审批。`readOnlyHint` 只代表服务端状态不被修改，不能证明参数不会携带本地数据外发。
+- `writes`：显式信任该 Server 后，可让 `readOnlyHint: true` 的工具直接执行，写入或未知工具仍审批。
 - `never`：宿主不审批；只应对已经由服务端权限系统充分保护的 Server 使用。
 
 启动时 `src/mcp.js` 会按游标分页调用 `listTools()`，并把发现的工具命名成：
@@ -334,7 +334,8 @@ HTTP 示例（`${MCP_TOKEN}` 在运行时从环境变量展开）：
 mcp__<server>__<tool>
 ```
 
-工具返回会保留原始 `content`、`structuredContent` 和 `_meta`，再由统一 Registry 序列化后交给模型。
+工具返回在执行层保留 `content`、`structuredContent` 和 `_meta`；进入模型上下文前会标记为不可信外部数据，
+明显的 Prompt Injection 片段只保留哈希证据，不把原始指令继续交给模型。
 
 如果 Server 声明 Resources 能力，minicode 额外提供两个只读桥接工具：
 
@@ -342,6 +343,10 @@ mcp__<server>__<tool>
 - `read_mcp_resource({server, uri})`：读取真实 URI 对应的内容。
 
 Resources 不会整批塞进系统 Prompt；Agent 需要时先发现、再按 URI 读取。当前 HTTP 支持静态 Header/Bearer Token；需要浏览器交互的 OAuth 授权流程尚未实现。
+
+MCP Server 返回的工具描述和参数说明同样属于不可信元数据。minicode 会去除控制字符、限制长度，
+并隔离包含目标覆盖、工具诱导或敏感数据外传特征的说明。该检查用于降低攻击面，不宣称能识别所有语义变体；
+最终安全边界仍是工具权限审批、参数 Schema、工作区限制和审计。
 
 本项目默认发现并暴露 Server 返回的全部工具，没有静态 `allowedTools`。如果未来需要减少上下文，应实现运行时工具目录和动态启用；部署级禁用则应通过 Server 自身 toolset、账号权限或独立配置控制，不应把“工具发现”和“永久 allowlist”混为一谈。
 
@@ -372,9 +377,22 @@ npm run benchmark
 
 # 使用本地 Qwen 跑一次真实模型评测
 node benchmark/run.js --mode real --provider ollama --runs 1
+
+# 量化并行调度、MCP、错误恢复、LoopGuard、checkpoint、上下文和结构化输出
+npm run benchmark:quantify
+
+# 使用 DeepSeek 做机制开启/关闭 A/B 测试（需要 DEEPSEEK_API_KEY）
+npm run benchmark:deepseek-ab
+
+# 使用 DeepSeek 做 Prompt Injection 对抗测试
+npm run benchmark:prompt-injection
 ```
 
 报告写入 `benchmark/results/*.json` 和 `*.md`。简历只能引用 `real` 模式结果。
+`benchmark:quantify` 会把确定性工程实验与本地模型实验分开统计；用于描述具体机制时应同时注明
+实验类型、模型、样本数和对照配置，不能把故障注入成功率当作真实模型任务完成率。
+`benchmark:deepseek-ab` 让 DeepSeek 实际生成 Tool Calls，并对并行调度、MCP 调用、故障恢复和
+长上下文保持做开启/关闭对照；checkpoint 仍使用确定性故障注入，因为文件保护不依赖模型能力。
 
 当前测试覆盖：
 

@@ -7,6 +7,7 @@
 // 安全：子助手只拿到只读工具，不会改文件、不会执行命令。
 
 import { validateArgs } from "./core/registry.js";
+import { protectUntrustedOutput } from "./security.js";
 
 const SUB_SYSTEM = `你是一个只读调查子助手。用提供的只读工具（read_file/list_dir/grep/glob）
 去查清楚交给你的问题，然后用简洁的中文要点给出结论。
@@ -50,7 +51,12 @@ export function makeSubagentTool({ client, model, tools, dispatch, getSignal, on
           result = await dispatch(call.function.name, args, { signal: getSignal?.() });
         }
         catch (e) { result = "出错：" + e.message; }
-        messages.push({ role: "tool", tool_call_id: call.id, content: String(result).slice(0, 4000) });
+        const bounded = String(result).slice(0, 4000);
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: protectUntrustedOutput(bounded, { source: `subagent:${call.function.name}` }),
+        });
       }
     }
     return "(子助手达到步数上限，未完成)";

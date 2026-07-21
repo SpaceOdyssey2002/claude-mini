@@ -81,7 +81,7 @@ async function main() {
   const stop = ui.startSpinner("连接 MCP 服务器");
   const {
     mcp, dispatch, allTools, skills, systemPrompt, baseConfirmNeeded,
-    isParallelSafe, toolPolicies, statePrompt, planState, checkpointManager,
+    isParallelSafe, isUntrustedResult, toolPolicies, statePrompt, planState, checkpointManager,
   } = await buildAgentContext({
     client, model: MODEL,
     getSignal: () => currentAbort?.signal,
@@ -307,6 +307,7 @@ async function main() {
         dispatch: (name, args, context) => registry.run(name, args, context),
         confirmNeeded,
         parallelSafe: isParallelSafe,
+        isUntrustedResult,
         statePrompt,
         compactIfNeeded: async () => {
           if (estimateTokens(messages) <= COMPACT_AT) return false;

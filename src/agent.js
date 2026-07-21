@@ -9,6 +9,7 @@
 // 界面渲染交给 deps.ui，中断信号由 deps.signal 传入。
 
 import { createHash, randomUUID } from "node:crypto";
+import { protectUntrustedOutput } from "./security.js";
 
 export const DEFAULT_SYSTEM = `你是一个运行在用户终端里的编程助手（一个迷你版 Claude Code）。
 你可以读写文件、执行命令、搜索代码，能用通过 MCP 接入的外部工具，
@@ -164,7 +165,10 @@ export async function runAgentTurn(client, messages, deps) {
     try {
       const result = await dispatch(call.name, args, { signal: deps.signal, ...audit });
       ui.onToolResult(call.name, result, { ...audit, isError: false, durationMs: Date.now() - startedAt });
-      return outcome(call, args, result, true);
+      const contextResult = deps.isUntrustedResult?.(call.name)
+        ? protectUntrustedOutput(result, { source: call.name })
+        : result;
+      return outcome(call, args, contextResult, true);
     } catch (err) {
       const msg = errorContent(err);
       ui.onToolResult(call.name, msg, { ...audit, isError: true, durationMs: Date.now() - startedAt });
