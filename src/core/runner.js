@@ -46,6 +46,7 @@ export class AgentRunner {
     this.systemPrompt = ctx.systemPrompt;
     this.statePrompt = ctx.statePrompt;
     this.planState = ctx.planState;
+    this.isUntrustedResult = ctx.isUntrustedResult;
 
     // notes 工具：让 agent 能把信息记进「跨话题持久笔记」
     const noteTool = {
@@ -232,6 +233,7 @@ export class AgentRunner {
         dispatch: (n, a, context) => this.registry.run(n, a, context),
         confirmNeeded: (n) => this.confirmNeeded(n),
         parallelSafe: (n) => this.isParallelSafe(n),
+        isUntrustedResult: (n) => this.isUntrustedResult(n),
         statePrompt: this.statePrompt,
         compactIfNeeded: async () => {
           if (estimateTokens(msgs) <= this.compactAt) return false;

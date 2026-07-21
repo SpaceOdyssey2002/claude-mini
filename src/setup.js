@@ -58,10 +58,12 @@ export async function buildAgentContext({ client, model, getSignal, onSubStep })
   const baseConfirmNeeded = (name) => toolPolicies.get(name)?.requiresApproval ?? (needsConfirm.has(name) || mcp.isMcpTool(name));
   const isReadOnly = (name) => !baseConfirmNeeded(name);
   const isParallelSafe = (name) => toolPolicies.get(name)?.parallelSafe === true;
+  const trustedResultTools = new Set(["write_file", "edit_file", "update_plan", "use_skill"]);
+  const isUntrustedResult = (name) => !trustedResultTools.has(name);
 
   return {
     mcp, dispatch, allTools, skills, systemPrompt, baseConfirmNeeded, isReadOnly,
-    isParallelSafe, toolPolicies, planState, checkpointManager,
+    isParallelSafe, isUntrustedResult, toolPolicies, planState, checkpointManager,
     statePrompt: () => planState.prompt(),
   };
 }
