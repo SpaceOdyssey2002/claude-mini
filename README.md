@@ -7,7 +7,8 @@
 - `npm start`：单进程 REPL，逻辑集中在 `src/index.js`，适合快速体验和理解 agent loop。
 - `npm run core` + `npm run cli`/`npm run tui`：daemon/client 架构，agent 在 `minicode-core` 中运行，客户端通过 TCP + JSON-RPC 订阅事件、审批权限、发起中断，适合学习 IPC 和可观测运行时。
 
-后端默认使用 DeepSeek 的 OpenAI 兼容接口。
+模型后端可在远程 DeepSeek 和本地 Ollama/Qwen 之间选择；两者共享同一套 OpenAI 形状的
+agent loop。为保持旧用法兼容，未指定时默认选择 DeepSeek。
 
 ## 功能
 
@@ -39,6 +40,7 @@ minicode/
   src/
     index.js              # 旧单进程 REPL 入口：界面、斜杠命令、权限确认、会话保存
     agent.js              # 核心 agent loop：流式模型调用、工具调用累积、执行工具、回喂结果
+    model.js              # DeepSeek/Ollama 提供商选择、客户端配置和本地模型检查
     setup.js              # 组装工具、MCP、Skills、子 agent，供 index 和 daemon 共用
     tools.js              # 内置工具和工作目录沙箱
     mcp.js                # MCP client 管理：连接 server、收集工具、路由调用
@@ -81,16 +83,23 @@ minicode/
 
 ## 安装
 
+先安装依赖：
+
 ```powershell
 npm install
+```
+
+远程 DeepSeek 需要 API key：
+
+```powershell
 $env:DEEPSEEK_API_KEY = "sk-..."
 ```
 
-可选：
+本地模式需要先启动 Ollama，并确认已安装 Qwen：
 
 ```powershell
-$env:DEEPSEEK_MODEL = "deepseek-chat"
-$env:MINICODE_WORKSPACE = "E:\minicode"
+ollama list
+ollama pull qwen3:8b   # 仅在尚未安装时执行
 ```
 
 
@@ -98,8 +107,30 @@ $env:MINICODE_WORKSPACE = "E:\minicode"
 ## 运行：单进程模式
 
 ```powershell
+# 本地 Ollama + qwen3:8b，不需要 DEEPSEEK_API_KEY
+npm run start:local
+
+# 远程 DeepSeek
+$env:DEEPSEEK_API_KEY = "sk-..."
+npm run start:deepseek
+```
+
+也可以使用同一个入口选择：
+
+```powershell
+npm start -- --provider ollama
+npm start -- --provider deepseek
+
+# 或通过环境变量选择
+$env:MINICODE_PROVIDER = "ollama"
 npm start
 ```
+
+`npm start` 未指定 provider 时仍默认 DeepSeek。本地启动会先检查
+`http://127.0.0.1:11434` 和目标模型，Ollama 未启动或模型未安装时会给出可恢复的错误提示。
+本地客户端在内部把 Ollama 原生 `/api/chat` 的流式内容、usage 和 Tool Calling 转换成项目已有
+的 OpenAI 消息形状。使用原生端点是为了让 `num_ctx`、`think` 和 `keep_alive` 确实生效；
+上层 Agent、子 Agent、压缩和结构化收尾不需要分叉。
 
 这个模式直接启动 `src/index.js`。它在同一个进程里完成：
 
@@ -129,11 +160,15 @@ exit        退出
 
 ## 运行：daemon/client 模式
 
-先开一个终端启动核心进程：
+先开一个终端启动核心进程，二选一：
 
 ```powershell
+# 本地 Qwen
+npm run core:local
+
+# 或远程 DeepSeek
 $env:DEEPSEEK_API_KEY = "sk-..."
-npm run core
+npm run core:deepseek
 ```
 
 再开另一个终端连接客户端：
@@ -220,7 +255,7 @@ CLI/TUI 选择 outputFormat
 ```
 
 执行和收尾分离，避免最终 JSON Schema 干扰中间 Tool Calling。结构化模式会多一次模型调用；
-DeepSeek 的 `json_object` 保证 JSON 语法，字段完整性由本地 Schema 校验保证，但两者都不能
+兼容端点的 `json_object` 用于约束 JSON 语法，字段完整性由本地 Schema 校验保证，但两者都不能
 保证内容在语义上真实，所以文件修改和测试结果仍以工具证据为准。使用 `/format text` 可恢复
 普通流式输出。该命令目前只接入 daemon/client 模式，旧的 `npm start` 单进程入口尚未支持。
 
@@ -334,6 +369,9 @@ npm run benchmark:mock
 # 真实模型，每项重复 3 次
 $env:DEEPSEEK_API_KEY = "sk-..."
 npm run benchmark
+
+# 使用本地 Qwen 跑一次真实模型评测
+node benchmark/run.js --mode real --provider ollama --runs 1
 ```
 
 报告写入 `benchmark/results/*.json` 和 `*.md`。简历只能引用 `real` 模式结果。
@@ -356,6 +394,7 @@ npm run benchmark
 - IPC 权限审批联调：假模型触发 `write_file`，客户端通过 `permission.respond` 批准，runner 继续写入文件。
 - stdio/Streamable HTTP MCP 发现与调用、HTTP Header 环境变量、Resources 发现/读取和 `structuredContent` 保留。
 - MCP annotations 权限策略，以及审计 ID 在工具调用、审批和结果之间的关联。
+- DeepSeek/Ollama 模型选择、默认值和本地推理参数校验。
 
 
 
@@ -364,12 +403,19 @@ npm run benchmark
 
 | 变量                    | 作用                                 |
 | --------------------- | ---------------------------------- |
-| `DEEPSEEK_API_KEY`    | DeepSeek API key，必填                |
+| `MINICODE_PROVIDER`   | `deepseek` 或 `ollama`，默认 `deepseek` |
+| `DEEPSEEK_API_KEY`    | DeepSeek 模式必填；Ollama 模式不需要 |
 | `DEEPSEEK_MODEL`      | 模型名，默认 `deepseek-chat`             |
+| `DEEPSEEK_BASE_URL`   | DeepSeek 兼容接口地址，默认官方地址 |
+| `OLLAMA_MODEL`        | 本地模型名，默认 `qwen3:8b` |
+| `OLLAMA_BASE_URL`     | Ollama 地址，默认 `http://127.0.0.1:11434`；传入末尾 `/v1` 也会自动归一化 |
+| `OLLAMA_NUM_CTX`      | 本地上下文长度，默认 `16384` |
+| `OLLAMA_THINK`        | 是否启用 Qwen thinking，默认 `false` |
+| `OLLAMA_KEEP_ALIVE`   | 模型驻留时长，默认 `10m` |
 | `MINICODE_WORKSPACE`  | 工作目录沙箱根，默认当前目录                     |
 | `MINICODE_YES`        | 自动批准所有需确认操作，谨慎使用                   |
 | `MINICODE_PORT`       | daemon/client 模式 TCP 端口，默认 `47800` |
-| `MINICODE_COMPACT_AT` | 超过多少 prompt token 后自动压缩，默认 `40000` |
+| `MINICODE_COMPACT_AT` | 自动压缩阈值；DeepSeek 默认 `40000`，Ollama 默认上下文长度的 75%（16K 时为 `12288`） |
 | `MINICODE_TOOL_CAP`   | 单个工具结果回喂模型的最大字符数，默认 `8000`         |
 | `MINICODE_MAX_ITERATIONS` | 单轮最多模型迭代数，默认 `12` |
 | `MINICODE_MAX_TOOL_CALLS` | 单轮最多工具调用数，默认 `30` |

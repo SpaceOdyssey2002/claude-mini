@@ -7,31 +7,34 @@
 // 好处：客户端崩了任务不一定死、可多客户端、过程可订阅可回放——这就是「运行时」而非「脚本」。
 
 import net from "node:net";
-import OpenAI from "openai";
 import { frame, createLineParser, rpc, dispatchRpc } from "./rpc.js";
 import { AgentRunner } from "./runner.js";
 import { Session } from "./memory.js";
 import { setWorkspace } from "../tools.js";
+import { createModelRuntime } from "../model.js";
 
 const PORT = Number(process.env.MINICODE_PORT) || 47800;
-const MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
 const WORKSPACE = process.env.MINICODE_WORKSPACE || process.cwd();
 
-if (!process.env.DEEPSEEK_API_KEY) {
-  console.error("✗ 未检测到 DEEPSEEK_API_KEY"); process.exit(1);
+let modelRuntime;
+try {
+  modelRuntime = createModelRuntime();
+  await modelRuntime.check();
+} catch (error) {
+  console.error("✗ " + error.message);
+  process.exit(1);
 }
+const { client, model: MODEL, provider: MODEL_PROVIDER, providerLabel: MODEL_PROVIDER_LABEL } = modelRuntime;
 setWorkspace(WORKSPACE);
-const client = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY, baseURL: "https://api.deepseek.com",
-  maxRetries: 3, timeout: 120_000,
-});
 
 const runners = new Map(); // sessionId → AgentRunner
 
 async function getRunner(sessionId, autoApprove) {
   if (sessionId && runners.has(sessionId)) return runners.get(sessionId);
   const session = (sessionId && Session.load(sessionId)) || new Session(sessionId || undefined);
-  const r = new AgentRunner({ client, model: MODEL, session, autoApprove });
+  const r = new AgentRunner({
+    client, model: MODEL, session, autoApprove, compactAt: modelRuntime.compactAt,
+  });
   await r.init();
   runners.set(r.session.id, r);
   return r;
@@ -124,7 +127,7 @@ const server = net.createServer((conn) => {
 server.listen(PORT, () => {
   console.log(`minicode-core daemon 监听 127.0.0.1:${PORT}`);
   console.log(`工作目录沙箱：${WORKSPACE}`);
-  console.log(`模型：${MODEL}  ·  Ctrl+C 停止`);
+  console.log(`模型：${MODEL_PROVIDER_LABEL} / ${MODEL} (${MODEL_PROVIDER})  ·  Ctrl+C 停止`);
 });
 
 process.on("SIGINT", () => { console.log("\nminicode-core 停止"); process.exit(0); });

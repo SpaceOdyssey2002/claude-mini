@@ -42,7 +42,7 @@ export function banner(info = {}) {
   const lines = [
     paint(c.bold + c.cyan, "✻ minicode") + paint(c.dim, "  迷你版 Claude Code"),
     "",
-    paint(c.dim, `模型  ${info.model || "?"}`),
+    paint(c.dim, `模型  ${info.provider ? info.provider + " / " : ""}${info.model || "?"}`),
     paint(c.dim, `工具  ${info.toolCount ?? "?"} 个` + (info.mcp ? `（含 MCP）` : "")),
     paint(c.dim, `目录  ${info.cwd || process.cwd()}`),
     "",
