@@ -3,7 +3,6 @@
 // 负责：启动横幅、初始化 MCP、斜杠命令、像 Claude Code 那样的权限确认、
 //       流式输出渲染、把一切接到 agent loop 上。
 
-import OpenAI from "openai";
 import readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { runAgentTurn, DEFAULT_SYSTEM } from "./agent.js";
@@ -16,31 +15,26 @@ import { newSessionId, saveSession, loadSession, listSessions } from "./session.
 import { buildAgentContext } from "./setup.js";
 import { ToolRegistry } from "./core/registry.js";
 import { appendAuditEvent, auditArgs, auditArgsHash, auditPreview } from "./core/audit.js";
+import { createModelRuntime } from "./model.js";
 import * as ui from "./ui.js";
 
 const { c, paint } = ui;
-const MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+
+let modelRuntime;
+try {
+  modelRuntime = createModelRuntime();
+} catch (error) {
+  console.error(paint(c.red, "✗ " + error.message));
+  process.exit(1);
+}
+const { client, model: MODEL, provider: MODEL_PROVIDER, providerLabel: MODEL_PROVIDER_LABEL } = modelRuntime;
 
 // 工作目录沙箱根：默认当前目录，可用环境变量覆盖。所有文件操作被限制在此目录内。
 const WORKSPACE = process.env.MINICODE_WORKSPACE || process.cwd();
 setWorkspace(WORKSPACE);
 
-// ── 鉴权 ─────────────────────────────────────────────────────────────
-if (!process.env.DEEPSEEK_API_KEY) {
-  console.error(paint(c.red, "✗ 未检测到环境变量 DEEPSEEK_API_KEY。"));
-  console.error(paint(c.dim, '  PowerShell：  $env:DEEPSEEK_API_KEY = "sk-..."  然后 npm start'));
-  process.exit(1);
-}
-
-const client = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  baseURL: "https://api.deepseek.com",
-  maxRetries: 3,      // 429 / 5xx / 网络错误自动退避重试
-  timeout: 120_000,   // 单次请求最长 2 分钟
-});
-
 // 超过这个上下文 token 数就自动压缩历史（可用环境变量覆盖）
-const COMPACT_AT = Number(process.env.MINICODE_COMPACT_AT) || 40000;
+const COMPACT_AT = Number(process.env.MINICODE_COMPACT_AT) || modelRuntime.compactAt;
 
 const rl = readline.createInterface({ input: stdin, output: stdout });
 
@@ -78,6 +72,10 @@ async function main() {
   let currentAbort = null;
   // 当前会话 id（每轮自动保存到 .sessions/<id>.json）
   let currentSessionId = newSessionId();
+
+  const modelStop = ui.startSpinner(`检查${MODEL_PROVIDER_LABEL}`);
+  try { await modelRuntime.check(); }
+  finally { modelStop(); }
 
   // 1) 装配 agent 上下文（MCP / 子 agent / Skills / dispatch / 系统提示）
   const stop = ui.startSpinner("连接 MCP 服务器");
@@ -193,7 +191,9 @@ async function main() {
   };
 
   // 5) 启动横幅
-  console.log("\n" + ui.banner({ model: MODEL, toolCount: allTools.length, mcp: hasMcp, cwd: getWorkspace() }));
+  console.log("\n" + ui.banner({
+    provider: MODEL_PROVIDER, model: MODEL, toolCount: allTools.length, mcp: hasMcp, cwd: getWorkspace(),
+  }));
   const past = listSessions();
   if (past.length) console.log(paint(c.dim, `  有 ${past.length} 个历史会话 · /sessions 查看 · /resume 恢复最近一次`));
 
@@ -388,4 +388,8 @@ function printMcp(mcp) {
   console.log(ui.box(lines, { color: c.gray }));
 }
 
-main();
+main().catch((error) => {
+  console.error(paint(c.red, "✗ 启动失败：" + error.message));
+  rl.close();
+  process.exitCode = 1;
+});

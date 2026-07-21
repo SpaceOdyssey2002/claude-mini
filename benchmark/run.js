@@ -5,21 +5,24 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import OpenAI from "openai";
 
 import { AgentRunner } from "../src/core/runner.js";
 import { Session } from "../src/core/memory.js";
 import { getWorkspace, setWorkspace } from "../src/tools.js";
+import { createModelRuntime } from "../src/model.js";
 import { tasks, setupTask } from "./tasks.js";
 
 function parseArgs(argv) {
-  const out = { mode: "mock", runs: 1, task: "", output: "" };
+  const out = { mode: "mock", runs: 1, task: "", output: "", provider: "" };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--mode") out.mode = argv[++i];
     else if (arg === "--runs") out.runs = Number(argv[++i]);
     else if (arg === "--task") out.task = argv[++i];
     else if (arg === "--output") out.output = argv[++i];
+    else if (arg === "--provider") out.provider = argv[++i];
+    else if (arg === "--local") out.provider = "ollama";
+    else if (arg === "--remote") out.provider = "deepseek";
     else if (arg === "--help" || arg === "-h") out.help = true;
     else throw new Error(`未知参数：${arg}`);
   }
@@ -34,9 +37,10 @@ function help() {
 用法：
   node benchmark/run.js --mode mock --runs 1
   node benchmark/run.js --mode real --runs 3
+  node benchmark/run.js --mode real --provider ollama --runs 1
   node benchmark/run.js --mode real --task fix_and_test
 
-真实模式需要 DEEPSEEK_API_KEY。结果写入 benchmark/results/。`;
+真实模式可使用 DeepSeek 或本地 Ollama；DeepSeek 需要 DEEPSEEK_API_KEY。结果写入 benchmark/results/。`;
 }
 
 function streamResponse({ calls = null, content = "", usage = { prompt_tokens: 20, completion_tokens: 5 } }) {
@@ -69,16 +73,6 @@ function makeMockClient(task) {
       return calls ? streamResponse({ calls }) : streamResponse({ content: task.mockFinal });
     } } },
   };
-}
-
-function makeRealClient() {
-  if (!process.env.DEEPSEEK_API_KEY) throw new Error("真实 benchmark 需要 DEEPSEEK_API_KEY");
-  return new OpenAI({
-    apiKey: process.env.DEEPSEEK_API_KEY,
-    baseURL: "https://api.deepseek.com",
-    maxRetries: 3,
-    timeout: 120_000,
-  });
 }
 
 function parseToolError(content) {
@@ -124,7 +118,7 @@ async function cleanupSession(id) {
   }
 }
 
-async function runOne(task, runNumber, mode, realClient) {
+async function runOne(task, runNumber, mode, realRuntime) {
   const originalCwd = process.cwd();
   const originalWorkspace = getWorkspace();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `minicode-bench-${task.id}-`));
@@ -137,10 +131,11 @@ async function runOne(task, runNumber, mode, realClient) {
     process.chdir(root);
     setWorkspace(root);
     runner = await new AgentRunner({
-      client: mode === "mock" ? makeMockClient(task) : realClient,
-      model: mode === "mock" ? "mock-model" : (process.env.DEEPSEEK_MODEL || "deepseek-chat"),
+      client: mode === "mock" ? makeMockClient(task) : realRuntime.client,
+      model: mode === "mock" ? "mock-model" : realRuntime.model,
       session: new Session(sessionId),
       autoApprove: true,
+      compactAt: mode === "mock" ? undefined : realRuntime.compactAt,
     }).init();
     const unsubscribe = runner.bus.subscribe((event) => events.push(event));
     let runResult;
@@ -258,12 +253,15 @@ async function main() {
   if (options.help) { console.log(help()); return; }
   const selected = options.task ? tasks.filter((t) => t.id === options.task) : tasks;
   if (!selected.length) throw new Error(`找不到任务：${options.task}`);
-  const realClient = options.mode === "real" ? makeRealClient() : null;
+  const realRuntime = options.mode === "real"
+    ? createModelRuntime({ argv: options.provider ? ["--provider", options.provider] : [] })
+    : null;
+  if (realRuntime) await realRuntime.check();
   const results = [];
   for (let run = 1; run <= options.runs; run++) {
     for (const task of selected) {
       process.stdout.write(`[${results.length + 1}/${selected.length * options.runs}] ${task.id} ... `);
-      const result = await runOne(task, run, options.mode, realClient);
+      const result = await runOne(task, run, options.mode, realRuntime);
       results.push(result);
       console.log(result.passed ? "PASS" : "FAIL");
     }
@@ -271,7 +269,8 @@ async function main() {
   const report = {
     createdAt: new Date().toISOString(),
     mode: options.mode,
-    model: options.mode === "mock" ? "mock-model" : (process.env.DEEPSEEK_MODEL || "deepseek-chat"),
+    provider: options.mode === "mock" ? "mock" : realRuntime.provider,
+    model: options.mode === "mock" ? "mock-model" : realRuntime.model,
     summary: summarize(results),
     results,
   };

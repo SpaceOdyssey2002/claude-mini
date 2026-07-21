@@ -11,7 +11,11 @@
   },
   "scripts": {
     "start": "node src/index.js",
+    "start:local": "node src/index.js --provider ollama",
+    "start:deepseek": "node src/index.js --provider deepseek",
     "core": "node src/core/daemon.js",
+    "core:local": "node src/core/daemon.js --provider ollama",
+    "core:deepseek": "node src/core/daemon.js --provider deepseek",
     "cli": "node src/clients/cli.js",
     "tui": "node src/clients/tui.js",
     "replay": "node src/clients/replay.js",

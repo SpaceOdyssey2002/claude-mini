@@ -16,12 +16,12 @@ import { formatFinalOutput, resolveOutputContract } from "../output.js";
 import { auditArgs, auditArgsHash, auditPreview } from "./audit.js";
 
 export class AgentRunner {
-  constructor({ client, model, session, autoApprove = false }) {
+  constructor({ client, model, session, autoApprove = false, compactAt = undefined }) {
     this.client = client;
     this.model = model;
     this.session = session || new Session();
     this.autoApprove = autoApprove;
-    this.compactAt = Number(process.env.MINICODE_COMPACT_AT) || 40000;
+    this.compactAt = Number(process.env.MINICODE_COMPACT_AT) || compactAt || 40000;
     this.ctxTokens = 0;
 
     this.currentAbort = null;
