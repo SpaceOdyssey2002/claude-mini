@@ -453,18 +453,3 @@ npm run benchmark:prompt-injection
 | `MINICODE_MAX_RECOVERY_ATTEMPTS` | 自动恢复/重规划次数，默认 `2` |
 | `MINICODE_RUN_TIMEOUT` | 单轮总时长上限（毫秒），默认 `600000` |
 | `MINICODE_PERMISSION_TIMEOUT` | daemon 权限审批等待上限（毫秒），默认 `300000` |
-
-
-
-
-## 学习路线
-
-建议按这个顺序读代码：
-
-1. `src/agent.js`：先理解 agent loop。
-2. `src/tools.js`：看工具定义、handler 和沙箱。
-3. `src/setup.js`：看工具、MCP、Skills、子 agent 如何被组装。
-4. `src/index.js`：看单进程 REPL 如何把这些能力接起来。
-5. `src/core/runner.js`、`src/core/daemon.js`、`src/clients/client.js`：看 daemon/client 的 IPC 权限审批和事件流。
-6. `src/mcp.js`、`src/subagent.js`、`src/skills.js`：看扩展能力。
-7. `src/context.js`、`src/core/memory.js`、`src/core/trace.js`：看长对话、记忆和可观测性。
